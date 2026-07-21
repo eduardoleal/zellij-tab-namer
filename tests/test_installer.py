@@ -210,6 +210,25 @@ load_plugins {
             self.assertEqual(applied.status, "complete")
             self.assertEqual(config_path.read_text(encoding="utf-8"), '{"old": true}\n')
 
+    def test_repeated_install_backs_up_previous_manifest(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+
+            first = install(InstallOptions(mode="cli", max_chars=28, paths=paths))
+            second = install(InstallOptions(mode="cli", max_chars=36, paths=paths))
+
+            self.assertEqual(first.status, "complete")
+            self.assertEqual(second.status, "complete")
+            manifest_data = json.loads(paths.manifest_file.read_text(encoding="utf-8"))
+            manifest_path = str(paths.manifest_file.resolve(strict=False))
+            manifest_records = [
+                record
+                for record in manifest_data["backups"]
+                if record["target"] == manifest_path
+            ]
+            self.assertEqual(len(manifest_records), 1)
+            self.assertTrue(Path(manifest_records[0]["backup"]).exists())
+
     def test_wasm_config_without_required_blocks_blocks_before_artifact_copy(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)

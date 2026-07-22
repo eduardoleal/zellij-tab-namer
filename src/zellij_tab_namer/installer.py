@@ -1291,7 +1291,11 @@ def _normalize_options(options: InstallOptions) -> InstallOptions:
     elif base_url_provided:
         if not llm_base_url or not llm_model:
             raise InstallError("--llm-base-url and --llm-model must not be empty")
-        if _mode_includes(options.mode, MODE_WASM):
+        native_artifact_requested = options.mode == MODE_WASM or (
+            options.mode == MODE_BOTH
+            and bool(options.wasm_source or options.wasm_url)
+        )
+        if native_artifact_requested:
             normalize_llm_base_url(llm_base_url)
     return InstallOptions(
         mode=options.mode,

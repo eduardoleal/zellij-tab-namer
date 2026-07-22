@@ -653,6 +653,43 @@ load_plugins {
 
             self.assertEqual(result.status, "complete")
 
+    def test_both_without_wasm_artifact_accepts_remote_cli_provider(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            result = install(
+                InstallOptions(
+                    mode="both",
+                    dry_run=True,
+                    llm_base_url="https://api.example.com/v1",
+                    llm_model="remote-model",
+                    paths=paths,
+                )
+            )
+
+            self.assertEqual(result.status, "complete")
+            self.assertEqual(result.runtime_status["cli"], "complete")
+            self.assertEqual(result.runtime_status["wasm"], "unavailable")
+
+    def test_both_with_wasm_artifact_rejects_remote_provider(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            with self.assertRaisesRegex(
+                InstallError,
+                "native LLM base URL must be",
+            ):
+                install(
+                    InstallOptions(
+                        mode="both",
+                        dry_run=True,
+                        wasm_source=source,
+                        llm_base_url="https://api.example.com/v1",
+                        llm_model="remote-model",
+                        paths=paths,
+                    )
+                )
+
     def test_wasm_apply_installs_artifact_config_and_permissions(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)

@@ -257,6 +257,7 @@ impl RefinementCoordinator {
         let eligible = tab.enabled
             && !tab.manual
             && !tab.terminal
+            && tab.observed_name == tab.generated
             && !tab.source.is_empty()
             && tab.source.len() <= MAX_SOURCE_BYTES
             && tab.source.chars().count() > tab.max_chars
@@ -597,9 +598,36 @@ mod tests {
             first.rename,
             RenameDecision::Rename("implement native ollama...".into())
         );
+        assert!(first.requests.is_empty());
+        assert!(second.requests.is_empty());
+        assert!(third.requests.is_empty());
+
+        let first = coordinator.reconcile(
+            1,
+            "implement native ollama...",
+            "implement native ollama compression safely",
+            "implement native ollama...",
+            24,
+            true,
+        );
+        let second = coordinator.reconcile(
+            2,
+            "review installer...",
+            "review installer permission migration carefully",
+            "review installer...",
+            24,
+            true,
+        );
+        coordinator.reconcile(
+            3,
+            "document native and...",
+            "document native and watcher configuration separately",
+            "document native and...",
+            24,
+            true,
+        );
         assert_eq!(first.requests.len(), 1);
         assert_eq!(second.requests.len(), 1);
-        assert!(third.requests.is_empty());
         assert_eq!(coordinator.in_flight_count(), 2);
         assert_eq!(coordinator.queued_count(), 1);
     }
@@ -622,8 +650,8 @@ mod tests {
             20,
             true,
         );
-        let request_id = first.requests[0].request_id;
-        coordinator.reconcile(
+        assert!(first.requests.is_empty());
+        let observed = coordinator.reconcile(
             7,
             "implement native...",
             "implement native ollama compression safely",
@@ -631,6 +659,7 @@ mod tests {
             20,
             true,
         );
+        let request_id = observed.requests[0].request_id;
         let completion = coordinator.finish(request_id, 200, &response("native Ollama"));
         assert_eq!(completion.rename, Some((7, "native Ollama".into())));
 
@@ -647,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn response_before_fallback_observation_is_discarded_and_cached() {
+    fn request_waits_for_fallback_observation() {
         let mut coordinator = RefinementCoordinator::default();
         let decision = coordinator.reconcile(
             8,
@@ -657,13 +686,8 @@ mod tests {
             18,
             true,
         );
-        let completion = coordinator.finish(
-            decision.requests[0].request_id,
-            200,
-            &response("review ordering"),
-        );
-        assert_eq!(completion.rename, None);
-        let repeated = coordinator.reconcile(
+        assert!(decision.requests.is_empty());
+        let observed = coordinator.reconcile(
             8,
             "review delayed...",
             "review delayed result ordering carefully",
@@ -671,15 +695,24 @@ mod tests {
             18,
             true,
         );
-        assert!(repeated.requests.is_empty());
+        assert_eq!(observed.requests.len(), 1);
     }
 
     #[test]
     fn manual_rename_during_flight_wins_for_tab_lifetime() {
         let mut coordinator = RefinementCoordinator::default();
-        let decision = coordinator.reconcile(
+        let initial = coordinator.reconcile(
             9,
             "Tab #10",
+            "protect manual production deployment label",
+            "protect manual...",
+            18,
+            true,
+        );
+        assert!(initial.requests.is_empty());
+        let decision = coordinator.reconcile(
+            9,
+            "protect manual...",
             "protect manual production deployment label",
             "protect manual...",
             18,
@@ -718,9 +751,17 @@ mod tests {
     #[test]
     fn stale_closed_unknown_and_cross_tab_results_are_ignored() {
         let mut coordinator = RefinementCoordinator::default();
-        let first = coordinator.reconcile(
+        coordinator.reconcile(
             11,
             "Tab #12",
+            "first source requiring model compression",
+            "first source...",
+            16,
+            true,
+        );
+        let first = coordinator.reconcile(
+            11,
+            "first source...",
             "first source requiring model compression",
             "first source...",
             16,
@@ -736,8 +777,16 @@ mod tests {
         );
         let stale = coordinator.finish(first.requests[0].request_id, 200, &response("wrong tab"));
         assert_eq!(stale.rename, None);
-        assert_eq!(stale.requests.len(), 1);
-        let current_request = stale.requests[0].request_id;
+        assert!(stale.requests.is_empty());
+        let current = coordinator.reconcile(
+            11,
+            "second source...",
+            "second source replacing queued generation",
+            "second source...",
+            16,
+            true,
+        );
+        let current_request = current.requests[0].request_id;
         coordinator.retain_tabs(&[]);
         assert_eq!(
             coordinator
@@ -757,7 +806,7 @@ mod tests {
     #[test]
     fn source_churn_coalesces_latest_generation_and_state_stays_bounded() {
         let mut coordinator = RefinementCoordinator::default();
-        let first = coordinator.reconcile(
+        coordinator.reconcile(
             21,
             "Tab #22",
             "initial title long enough to request inference",
@@ -765,12 +814,23 @@ mod tests {
             16,
             true,
         );
+        let first = coordinator.reconcile(
+            21,
+            "initial title...",
+            "initial title long enough to request inference",
+            "initial title...",
+            16,
+            true,
+        );
         let request_id = first.requests[0].request_id;
+        let mut current_name = "initial title...";
         for index in 0..2_000 {
             let source = format!("latest changing source generation number {index}");
+            coordinator.reconcile(21, current_name, &source, "latest changing...", 18, true);
+            current_name = "latest changing...";
             coordinator.reconcile(
                 21,
-                "initial title...",
+                "latest changing...",
                 &source,
                 "latest changing...",
                 18,

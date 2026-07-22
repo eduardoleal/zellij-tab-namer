@@ -43,7 +43,6 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WebPermission {
     Disabled,
-    Awaiting,
     Granted,
     Denied,
 }
@@ -105,7 +104,11 @@ impl Adapter {
     pub fn new(configuration: BTreeMap<String, String>) -> Self {
         let config = NativeConfig::parse(&configuration);
         let permission = if config.ollama.is_some() {
-            WebPermission::Awaiting
+            // Native configuration is installed together with a path-keyed
+            // WebAccess pre-grant. Zellij does not emit a permission result
+            // when that cached grant is already satisfied, so configuration
+            // is the readiness assertion; a later denial still closes it.
+            WebPermission::Granted
         } else {
             WebPermission::Disabled
         };
@@ -332,9 +335,8 @@ mod tests {
     }
 
     #[test]
-    fn fallback_rename_precedes_async_request_after_permission_grant() {
+    fn fallback_must_be_observed_before_async_request() {
         let mut adapter = Adapter::new(configured());
-        adapter.permission_result(true);
         let actions = adapter.reconcile(
             3,
             "Tab #4",
@@ -342,7 +344,16 @@ mod tests {
             "implement native...",
         );
         assert!(matches!(actions[0], Action::Rename { tab_id: 3, .. }));
-        assert!(matches!(actions[1], Action::WebRequest { .. }));
+        assert!(actions
+            .iter()
+            .all(|action| !matches!(action, Action::WebRequest { .. })));
+        let observed = adapter.reconcile(
+            3,
+            "implement native...",
+            "implement native ollama compression safely",
+            "implement native...",
+        );
+        assert!(matches!(observed[0], Action::WebRequest { .. }));
     }
 
     #[test]
@@ -374,11 +385,16 @@ mod tests {
     #[test]
     fn request_contains_only_json_contract_and_opaque_id_context() {
         let mut adapter = Adapter::new(configured());
-        adapter.permission_result(true);
+        adapter.reconcile(
+            9,
+            "Tab #10",
+            "review native integration metadata carefully",
+            "review native...",
+        );
         let request = adapter
             .reconcile(
                 9,
-                "Tab #10",
+                "review native...",
                 "review native integration metadata carefully",
                 "review native...",
             )
@@ -405,9 +421,15 @@ mod tests {
     fn result_does_not_touch_debounce_and_diagnostics_are_generation_bounded() {
         let mut adapter = Adapter::new(configured());
         adapter.permission_result(true);
-        let actions = adapter.reconcile(
+        adapter.reconcile(
             5,
             "Tab #6",
+            "debug asynchronous web result routing",
+            "debug async...",
+        );
+        let actions = adapter.reconcile(
+            5,
+            "debug async...",
             "debug asynchronous web result routing",
             "debug async...",
         );

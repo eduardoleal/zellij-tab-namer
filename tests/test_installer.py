@@ -765,19 +765,21 @@ load_plugins {{
         class FakeStat:
             st_flags = 0x2
 
-        with patch("platform.system", return_value="Darwin"), patch.object(
-            Path,
-            "stat",
-            return_value=FakeStat(),
-        ), patch.object(
-            installer_module.stat,
-            "UF_IMMUTABLE",
-            0x2,
-            create=True,
-        ):
-            self.assertTrue(
-                installer_module._is_user_immutable(Path("/tmp/permissions.kdl"))
-            )
+        with tempfile.TemporaryDirectory() as tempdir:
+            permissions_path = Path(tempdir) / "permissions.kdl"
+            permissions_path.write_text("", encoding="utf-8")
+
+            with patch("platform.system", return_value="Darwin"), patch.object(
+                Path,
+                "stat",
+                return_value=FakeStat(),
+            ), patch.object(
+                installer_module.stat,
+                "UF_IMMUTABLE",
+                0x2,
+                create=True,
+            ):
+                self.assertTrue(installer_module._is_user_immutable(permissions_path))
 
     def test_rollback_restores_preinstall_mutable_permissions_flag(self):
         with tempfile.TemporaryDirectory() as tempdir:

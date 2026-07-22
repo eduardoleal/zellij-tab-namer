@@ -312,6 +312,35 @@ load_plugins {
             self.assertIn("plugins and load_plugins", "\n".join(result.messages))
             self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
 
+    def test_wasm_refuses_symlinked_config_without_replacing_link(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            real_config = Path(tempdir) / "dotfiles" / "config.kdl"
+            real_config.parent.mkdir(parents=True)
+            original_config = "plugins {\n}\n\nload_plugins {\n}\n"
+            real_config.write_text(original_config, encoding="utf-8")
+            config_path = paths.zellij_config_dir / "config.kdl"
+            config_path.symlink_to(real_config)
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            result = install(
+                InstallOptions(
+                    mode="wasm",
+                    wasm_source=source,
+                    freeze_permissions=False,
+                    paths=paths,
+                )
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIn("managed install target is a symlink", "\n".join(result.messages))
+            self.assertTrue(config_path.is_symlink())
+            self.assertEqual(config_path.resolve(strict=False), real_config.resolve(strict=False))
+            self.assertEqual(real_config.read_text(encoding="utf-8"), original_config)
+            self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+            self.assertFalse(paths.manifest_file.exists())
+
     def test_wasm_dry_run_url_does_not_download_or_write_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)
@@ -490,6 +519,77 @@ load_plugins {
             )
             self.assertFalse(paths.permissions_file.exists())
             self.assertFalse(paths.manifest_file.exists())
+
+    def test_rollback_restores_preinstall_mutable_permissions_flag(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            (paths.zellij_config_dir / "config.kdl").write_text(
+                "plugins {\n}\n\nload_plugins {\n}\n",
+                encoding="utf-8",
+            )
+            paths.permissions_file.parent.mkdir(parents=True)
+            original_permissions = '"/tmp/other.wasm" {\n    ReadApplicationState\n}\n'
+            paths.permissions_file.write_text(original_permissions, encoding="utf-8")
+            source = write_wasm(Path(tempdir) / "source.wasm")
+            permissions_path = paths.permissions_file.resolve(strict=False)
+            immutable_state = {"permissions": False}
+
+            def is_user_immutable(path):
+                return (
+                    Path(path).resolve(strict=False) == permissions_path
+                    and immutable_state["permissions"]
+                )
+
+            def clear_immutable(path):
+                if Path(path).resolve(strict=False) == permissions_path:
+                    immutable_state["permissions"] = False
+
+            def set_immutable(path):
+                if Path(path).resolve(strict=False) == permissions_path:
+                    immutable_state["permissions"] = True
+
+            with patch.object(
+                installer_module,
+                "_is_user_immutable",
+                side_effect=is_user_immutable,
+            ), patch.object(
+                installer_module,
+                "_clear_immutable",
+                side_effect=clear_immutable,
+            ), patch.object(
+                installer_module,
+                "_set_immutable",
+                side_effect=set_immutable,
+            ):
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        wasm_permissions=("ChangeApplicationState",),
+                        paths=paths,
+                    )
+                )
+                self.assertEqual(result.status, "complete")
+                self.assertTrue(immutable_state["permissions"])
+
+                manifest_data = json.loads(paths.manifest_file.read_text(encoding="utf-8"))
+                permission_records = [
+                    record
+                    for record in manifest_data["backups"]
+                    if record["target"] == str(permissions_path)
+                ]
+                self.assertEqual(len(permission_records), 1)
+                self.assertFalse(permission_records[0]["immutable"])
+
+                applied = rollback(paths=paths)
+
+            self.assertEqual(applied.status, "complete")
+            self.assertFalse(immutable_state["permissions"])
+            self.assertEqual(
+                paths.permissions_file.read_text(encoding="utf-8"),
+                original_permissions,
+            )
 
     def test_wasm_rejects_invalid_artifact(self):
         with tempfile.TemporaryDirectory() as tempdir:

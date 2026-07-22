@@ -112,6 +112,7 @@ class BackupRecord:
     backup: Optional[str]
     existed: bool
     checksum: Optional[str] = None
+    immutable: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -534,6 +535,7 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
 
 def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
     config_path = options.paths.zellij_config_dir / "config.kdl"
+    _refuse_symlink_target(config_path)
     try:
         config_text = config_path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
@@ -551,6 +553,7 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
     permissions_changed = False
     if options.wasm_permissions:
         permissions_path = options.paths.permissions_file
+        _refuse_symlink_target(permissions_path)
         try:
             permissions_text = permissions_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -681,6 +684,7 @@ def _write_text_with_backup(
     content: str,
     backup_dir: Path,
 ) -> Optional[BackupRecord]:
+    _refuse_symlink_target(path)
     encoded = content.encode("utf-8")
     if path.exists() and path.read_bytes() == encoded:
         return None
@@ -699,6 +703,7 @@ def _write_permissions_change(
     content: str,
     backup_dir: Path,
 ) -> Tuple[Optional[BackupRecord], bool]:
+    _refuse_symlink_target(path)
     encoded = content.encode("utf-8")
     originally_immutable = _is_user_immutable(path)
     if path.exists() and path.read_bytes() == encoded:
@@ -720,6 +725,7 @@ def _write_permissions_change(
             backup=record.backup if record else None,
             existed=bool(record),
             checksum=_sha256_file(path),
+            immutable=originally_immutable,
         ),
         originally_immutable,
     )
@@ -735,6 +741,7 @@ def _copy_with_backup(
     target: Path,
     backup_dir: Path,
 ) -> Optional[BackupRecord]:
+    _refuse_symlink_target(target)
     _validate_wasm_file(source, None)
     if target.exists() and _sha256_file(target) == _sha256_file(source):
         return None
@@ -760,6 +767,7 @@ def _copy_with_backup(
 
 
 def _write_text_atomic(path: Path, content: str) -> None:
+    _refuse_symlink_target(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     temp_path = Path(temp_name)
@@ -843,6 +851,7 @@ def _rollback_record(
     target = _normalize_path(Path(str(record["target"])))
     existed = bool(record.get("existed"))
     backup = record.get("backup")
+    restore_immutable = _permissions_restore_immutable(target, paths, record)
 
     if dry_run:
         detail = f"restore from {backup}" if existed else "remove created file"
@@ -858,6 +867,7 @@ def _rollback_record(
                 target,
                 paths,
                 lambda: _restore_backup(backup_path, target),
+                restore_immutable=restore_immutable,
             )
             result.operations.append(
                 Operation("rollback", str(target), "complete", f"restored {backup}")
@@ -867,6 +877,7 @@ def _rollback_record(
                 target,
                 paths,
                 lambda: _unlink_missing_ok(target),
+                restore_immutable=restore_immutable,
             )
             result.operations.append(
                 Operation("rollback", str(target), "complete", "removed created file")
@@ -946,19 +957,29 @@ def _mutate_maybe_permissions_file(
     target: Path,
     paths: InstallPaths,
     action: Callable[[], None],
+    restore_immutable: Optional[bool] = None,
 ) -> None:
     permissions_file = _normalize_path(paths.permissions_file)
     if target != permissions_file:
         action()
         return
-    originally_immutable = _is_user_immutable(target)
-    if originally_immutable:
+    current_immutable = _is_user_immutable(target)
+    if current_immutable:
         _clear_immutable(target)
     try:
         action()
     finally:
-        if originally_immutable and target.exists():
+        should_be_immutable = (
+            current_immutable if restore_immutable is None else restore_immutable
+        )
+        if should_be_immutable and target.exists() and not _is_user_immutable(target):
             _set_immutable(target)
+        elif (
+            not should_be_immutable
+            and target.exists()
+            and _is_user_immutable(target)
+        ):
+            _clear_immutable(target)
 
 
 def _manifest_record_present(records: Sequence[object], manifest_file: Path) -> bool:
@@ -1266,6 +1287,24 @@ def _target_allowed(target: Path, paths: InstallPaths) -> bool:
         _normalize_path(paths.manifest_file),
     }
     return target in exact
+
+
+def _refuse_symlink_target(path: Path) -> None:
+    if path.is_symlink():
+        raise InstallError(f"managed install target is a symlink: {path}")
+
+
+def _permissions_restore_immutable(
+    target: Path,
+    paths: InstallPaths,
+    record: Mapping[str, object],
+) -> Optional[bool]:
+    if target != _normalize_path(paths.permissions_file) or "immutable" not in record:
+        return None
+    immutable = record.get("immutable")
+    if immutable is None:
+        return None
+    return bool(immutable)
 
 
 def _is_user_immutable(path: Path) -> bool:

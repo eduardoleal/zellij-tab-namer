@@ -35,6 +35,16 @@ its caveat. The setup command edits Zellij configuration and pre-grants the
 headless plugin permissions; run the final command from outside Zellij so a
 fresh server loads them.
 
+### Source checkout for non-Homebrew installs
+
+The released-WASM and Python-watcher paths below run `install.sh` from an
+authenticated source checkout. Clone it once before using either path:
+
+```sh
+gh repo clone eduardoleal/zellij-tab-namer
+cd zellij-tab-namer
+```
+
 ### Released native WASM plugin
 
 To install without Homebrew, use GitHub CLI to download the prebuilt `v0.2.0`

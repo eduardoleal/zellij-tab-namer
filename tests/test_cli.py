@@ -220,6 +220,150 @@ class CLITests(unittest.TestCase):
             self.assertEqual(len(runner_with_force.renames), 1)
             self.assertEqual(runner_with_force.renames[0][3:], ["1", "Implement release cleanup"])
 
+    def test_install_both_dry_run_reports_cli_complete_and_wasm_unavailable(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            code = run(
+                [
+                    "install",
+                    "--mode",
+                    "both",
+                    "--dry-run",
+                    "--zellij-config-dir",
+                    os.path.join(tempdir, "zellij"),
+                    "--tab-namer-config-dir",
+                    os.path.join(tempdir, "zellij-tab-namer"),
+                    "--permissions-file",
+                    os.path.join(tempdir, "cache", "permissions.kdl"),
+                    "--manifest-file",
+                    os.path.join(tempdir, "zellij-tab-namer", "manifest.json"),
+                    "--state-file",
+                    os.path.join(tempdir, "state", "state.json"),
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("both status: complete", stdout.getvalue())
+            self.assertIn("cli: complete", stdout.getvalue())
+            self.assertIn("wasm: unavailable", stdout.getvalue())
+            self.assertIn("verify: zellij-tab-namer once --dry-run", stdout.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertFalse(os.path.exists(os.path.join(tempdir, "zellij-tab-namer")))
+
+    def test_install_wasm_without_artifact_returns_blocked(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            code = run(
+                [
+                    "install",
+                    "--mode",
+                    "wasm",
+                    "--dry-run",
+                    "--zellij-config-dir",
+                    os.path.join(tempdir, "zellij"),
+                    "--tab-namer-config-dir",
+                    os.path.join(tempdir, "zellij-tab-namer"),
+                    "--permissions-file",
+                    os.path.join(tempdir, "cache", "permissions.kdl"),
+                    "--manifest-file",
+                    os.path.join(tempdir, "zellij-tab-namer", "manifest.json"),
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("wasm status: blocked", stderr.getvalue())
+            self.assertIn("wasm: unavailable", stderr.getvalue())
+
+    def test_install_wasm_uses_explicit_zellij_config_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_file = os.path.join(tempdir, "runtime", "zellij.kdl")
+            os.makedirs(os.path.dirname(config_file))
+            with open(config_file, "w", encoding="utf-8") as handle:
+                handle.write("plugins {\n}\n\nload_plugins {\n}\n")
+            wasm_source = os.path.join(tempdir, "source.wasm")
+            with open(wasm_source, "wb") as handle:
+                handle.write(b"\0asmfixture")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            code = run(
+                [
+                    "install",
+                    "--mode",
+                    "wasm",
+                    "--dry-run",
+                    "--zellij-config-dir",
+                    os.path.join(tempdir, "zellij"),
+                    "--zellij-config-file",
+                    config_file,
+                    "--wasm-source",
+                    wasm_source,
+                    "--tab-namer-config-dir",
+                    os.path.join(tempdir, "zellij-tab-namer"),
+                    "--permissions-file",
+                    os.path.join(tempdir, "cache", "permissions.kdl"),
+                    "--manifest-file",
+                    os.path.join(tempdir, "zellij-tab-namer", "manifest.json"),
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn(
+                f"write zellij config: {os.path.realpath(config_file)}",
+                stdout.getvalue(),
+            )
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_rollback_dry_run_reports_manifest_actions(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            manifest = os.path.join(tempdir, "zellij-tab-namer", "manifest.json")
+            config_dir = os.path.join(tempdir, "zellij-tab-namer")
+            code = run(
+                [
+                    "install",
+                    "--mode",
+                    "cli",
+                    "--tab-namer-config-dir",
+                    config_dir,
+                    "--manifest-file",
+                    manifest,
+                    "--state-file",
+                    os.path.join(tempdir, "state", "state.json"),
+                ],
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 0)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            code = run(
+                [
+                    "rollback",
+                    "--dry-run",
+                    "--tab-namer-config-dir",
+                    config_dir,
+                    "--manifest-file",
+                    manifest,
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("rollback status: complete", stdout.getvalue())
+            self.assertIn("[planned] rollback:", stdout.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+
 
 if __name__ == "__main__":
     unittest.main()

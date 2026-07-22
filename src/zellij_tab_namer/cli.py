@@ -5,11 +5,23 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, TextIO
 
+from zellij_tab_namer.installer import (
+    InstallOptions,
+    InstallPaths,
+    InstallResult,
+    MANIFEST_FILENAME,
+    MODE_BOTH,
+    VALID_MODES,
+    format_result,
+    install,
+    rollback,
+)
 from zellij_tab_namer.llm import compress_label, config_from_env
 from zellij_tab_namer.naming import NamerConfig, RenameDecision, plan_renames
 
@@ -31,6 +43,12 @@ def run(
     err = stderr or sys.stderr
     runner = command_runner or _run_command
     args = _build_parser().parse_args(argv)
+
+    if args.command == "install":
+        return _run_install(args, out, err)
+
+    if args.command == "rollback":
+        return _run_rollback(args, out, err)
 
     if args.command == "watch":
         while True:
@@ -157,6 +175,77 @@ def _build_parser() -> argparse.ArgumentParser:
         help="seconds between watch iterations",
     )
 
+    install_parser = subparsers.add_parser(
+        "install",
+        help="set up CLI watcher or WASM plugin integration",
+    )
+    install_parser.add_argument(
+        "--mode",
+        choices=sorted(VALID_MODES),
+        default=MODE_BOTH,
+        help="runtime path to configure",
+    )
+    install_parser.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="seconds between watch iterations for the CLI watcher",
+    )
+    install_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print planned installer changes without writing files",
+    )
+    _add_runtime_options(install_parser)
+    _add_install_path_options(install_parser)
+    install_parser.add_argument(
+        "--llm-base-url",
+        help="OpenAI-compatible chat completions base URL to record in config",
+    )
+    install_parser.add_argument(
+        "--llm-model",
+        help="model name to record in config",
+    )
+    install_parser.add_argument(
+        "--command-name",
+        default="zellij-tab-namer",
+        help="command name used in generated watch and verification commands",
+    )
+    install_parser.add_argument(
+        "--wasm-source",
+        help="local WASM artifact to install into the Zellij plugins directory",
+    )
+    install_parser.add_argument(
+        "--wasm-url",
+        help="WASM artifact URL to download and install",
+    )
+    install_parser.add_argument(
+        "--wasm-sha256",
+        help="expected SHA-256 digest for --wasm-source or --wasm-url",
+    )
+    install_parser.add_argument(
+        "--wasm-permission",
+        action="append",
+        default=[],
+        help="permission grant to add for WASM mode; may be repeated",
+    )
+    install_parser.add_argument(
+        "--no-freeze-permissions",
+        action="store_true",
+        help="do not restore the macOS immutable flag after editing permissions.kdl",
+    )
+
+    rollback_parser = subparsers.add_parser(
+        "rollback",
+        help="restore files from the latest installer manifest",
+    )
+    rollback_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print rollback actions without mutating files",
+    )
+    _add_install_path_options(rollback_parser)
+
     return parser
 
 
@@ -166,6 +255,15 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="print planned renames without applying them or saving state",
     )
+    _add_runtime_options(parser)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="rename even when the current tab name looks manual",
+    )
+
+
+def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-chars",
         type=int,
@@ -187,11 +285,161 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="disable optional OpenAI-compatible label compression",
     )
+
+
+def _add_install_path_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--force",
-        action="store_true",
-        help="rename even when the current tab name looks manual",
+        "--zellij-config-dir",
+        help="Zellij config directory, defaulting to XDG config or ~/.config/zellij",
     )
+    parser.add_argument(
+        "--zellij-config-file",
+        help="Zellij config file to edit, defaulting to ZELLIJ_CONFIG_FILE or <zellij-config-dir>/config.kdl",
+    )
+    parser.add_argument(
+        "--plugins-dir",
+        help="Zellij plugin directory, defaulting to <zellij-config-dir>/plugins",
+    )
+    parser.add_argument(
+        "--tab-namer-config-dir",
+        help="config directory for zellij-tab-namer installer files",
+    )
+    parser.add_argument(
+        "--permissions-file",
+        help="Zellij permissions.kdl file to update for WASM grants",
+    )
+    parser.add_argument(
+        "--backup-dir",
+        help="directory for installer-created backups",
+    )
+    parser.add_argument(
+        "--manifest-file",
+        help="installer manifest used by rollback",
+    )
+
+
+def _run_install(
+    args: argparse.Namespace,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    try:
+        paths = _install_paths_from_args(args)
+        result = install(
+            InstallOptions(
+                mode=args.mode,
+                dry_run=args.dry_run,
+                max_chars=args.max_chars,
+                interval=args.interval,
+                no_llm=args.no_llm,
+                llm_base_url=args.llm_base_url,
+                llm_model=args.llm_model,
+                zellij_bin=args.zellij_bin,
+                command_name=args.command_name,
+                wasm_source=Path(args.wasm_source).expanduser()
+                if args.wasm_source
+                else None,
+                wasm_url=args.wasm_url,
+                wasm_sha256=args.wasm_sha256,
+                wasm_permissions=tuple(args.wasm_permission or ()),
+                freeze_permissions=not args.no_freeze_permissions,
+                paths=paths,
+            )
+        )
+    except Exception as exc:
+        stderr.write(f"install failed: {exc}\n")
+        return 1
+
+    return _emit_result(result, stdout, stderr)
+
+
+def _run_rollback(
+    args: argparse.Namespace,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    try:
+        result = rollback(paths=_install_paths_from_args(args), dry_run=args.dry_run)
+    except Exception as exc:
+        stderr.write(f"rollback failed: {exc}\n")
+        return 1
+
+    return _emit_result(result, stdout, stderr)
+
+
+def _emit_result(
+    result: InstallResult,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    output = format_result(result)
+    if result.status == "blocked":
+        stderr.write(output)
+    else:
+        stdout.write(output)
+    return result.exit_code()
+
+
+def _install_paths_from_args(args: argparse.Namespace) -> InstallPaths:
+    defaults = InstallPaths.defaults()
+    zellij_config_dir = _path_arg(args.zellij_config_dir, defaults.zellij_config_dir)
+    default_zellij_config_file = (
+        zellij_config_dir / "config.kdl"
+        if args.zellij_config_dir and not args.zellij_config_file
+        else defaults.zellij_config_file
+    )
+    zellij_config_file = _path_arg(
+        args.zellij_config_file,
+        default_zellij_config_file,
+        file_target=True,
+    )
+    plugins_dir = _path_arg(
+        args.plugins_dir,
+        zellij_config_dir / "plugins",
+    )
+    tab_namer_config_dir = _path_arg(
+        args.tab_namer_config_dir,
+        defaults.tab_namer_config_dir,
+    )
+    state_file = _path_arg(
+        getattr(args, "state_file", None),
+        defaults.state_file,
+        file_target=True,
+    )
+    permissions_file = _path_arg(
+        args.permissions_file,
+        defaults.permissions_file,
+        file_target=True,
+    )
+    backup_dir = _path_arg(args.backup_dir, tab_namer_config_dir / "backups")
+    manifest_file = _path_arg(
+        args.manifest_file,
+        tab_namer_config_dir / MANIFEST_FILENAME,
+        file_target=True,
+    )
+    return InstallPaths(
+        zellij_config_dir=zellij_config_dir,
+        zellij_config_file=zellij_config_file,
+        plugins_dir=plugins_dir,
+        tab_namer_config_dir=tab_namer_config_dir,
+        state_file=state_file,
+        permissions_file=permissions_file,
+        backup_dir=backup_dir,
+        manifest_file=manifest_file,
+    )
+
+
+def _path_arg(
+    value: Optional[str],
+    default: Path,
+    file_target: bool = False,
+) -> Path:
+    path = Path(value).expanduser() if value else default.expanduser()
+    if not file_target:
+        return path.resolve(strict=False)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.parent.resolve(strict=False) / path.name
 
 
 def _load_state(path: str) -> Dict[str, Any]:

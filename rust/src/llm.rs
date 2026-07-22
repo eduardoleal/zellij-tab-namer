@@ -92,6 +92,9 @@ pub fn chat_completions_url(base_url: &str) -> Result<String, RequestError> {
     }
 
     let normalized_path = parsed.path().trim_end_matches('/');
+    if !matches!(normalized_path, "" | "/v1") {
+        return Err(RequestError::InvalidBaseUrl);
+    }
     let path = if normalized_path.is_empty() {
         "/chat/completions".to_owned()
     } else {

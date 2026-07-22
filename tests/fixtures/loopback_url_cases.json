@@ -8,5 +8,6 @@
   {"input":"http://127.0.0.2:11434/v1","valid":false,"normalized":null},
   {"input":"http://user@localhost:11434/v1","valid":false,"normalized":null},
   {"input":"http://localhost:11434/v1?redirect=1","valid":false,"normalized":null},
-  {"input":"http://localhost:11434/v1#fragment","valid":false,"normalized":null}
+  {"input":"http://localhost:11434/v1#fragment","valid":false,"normalized":null},
+  {"input":"http://localhost:11434/api","valid":false,"normalized":null}
 ]

@@ -196,7 +196,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print planned installer changes without writing files",
     )
-    _add_runtime_options(install_parser)
+    _add_runtime_options(install_parser, no_llm_default=None)
     _add_install_path_options(install_parser)
     install_parser.add_argument(
         "--llm-base-url",
@@ -263,7 +263,10 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
+def _add_runtime_options(
+    parser: argparse.ArgumentParser,
+    no_llm_default: Optional[bool] = False,
+) -> None:
     parser.add_argument(
         "--max-chars",
         type=int,
@@ -283,6 +286,7 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-llm",
         action="store_true",
+        default=no_llm_default,
         help="disable optional OpenAI-compatible label compression",
     )
 

@@ -4,8 +4,10 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from zellij_tab_namer.cli import run
+from zellij_tab_namer.installer import InstallResult
 
 
 def completed(stdout="", stderr="", returncode=0):
@@ -40,6 +42,64 @@ class FakeRunner:
 
 
 class CLITests(unittest.TestCase):
+    def test_install_propagates_native_llm_tri_state_and_dry_run(self):
+        cases = (
+            ([], None, None, None),
+            (
+                [
+                    "--llm-base-url",
+                    "http://localhost:11434/v1",
+                    "--llm-model",
+                    "llama3.2",
+                ],
+                None,
+                "http://localhost:11434/v1",
+                "llama3.2",
+            ),
+            (["--no-llm"], True, None, None),
+            (
+                [
+                    "--no-llm",
+                    "--llm-base-url",
+                    "http://localhost:11434/v1",
+                    "--llm-model",
+                    "ignored",
+                ],
+                True,
+                "http://localhost:11434/v1",
+                "ignored",
+            ),
+        )
+        for extra, expected_no_llm, expected_url, expected_model in cases:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as tempdir:
+                captured = []
+
+                def fake_install(options):
+                    captured.append(options)
+                    return InstallResult(status="complete", mode="wasm", dry_run=True)
+
+                with patch("zellij_tab_namer.cli.install", side_effect=fake_install):
+                    code = run(
+                        [
+                            "install",
+                            "--mode",
+                            "wasm",
+                            "--dry-run",
+                            "--zellij-config-dir",
+                            os.path.join(tempdir, "zellij"),
+                            *extra,
+                        ],
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+
+                self.assertEqual(code, 0)
+                self.assertEqual(len(captured), 1)
+                self.assertEqual(captured[0].no_llm, expected_no_llm)
+                self.assertEqual(captured[0].llm_base_url, expected_url)
+                self.assertEqual(captured[0].llm_model, expected_model)
+                self.assertTrue(captured[0].dry_run)
+
     def test_dry_run_prints_planned_renames_without_applying_or_saving_state(self):
         runner = FakeRunner(
             panes=[

@@ -12,6 +12,7 @@ from zellij_tab_namer.installer import (
     InstallOptions,
     InstallPaths,
     install,
+    normalize_llm_base_url,
     rollback,
     update_permission_grants,
     wire_zellij_config,
@@ -321,10 +322,13 @@ load_plugins {
         self.assertEqual(rewired.count("\n    zellij-tab-namer\n"), 1)
         self.assertIn('autolock location="file:/tmp/autolock.wasm"', rewired)
 
-    def test_wire_zellij_config_rejects_partial_max_chars_match(self):
+    def test_wire_zellij_config_updates_managed_values_preserving_unknown_nodes(self):
         config = """plugins {
     zellij-tab-namer location="file:/tmp/zellij-tab-namer.wasm" {
         max_chars 240
+        unknown_setting "keep me" // user-owned
+        llm_base_url "http://localhost:11434/v1"
+        llm_model "old-model"
     }
 }
 
@@ -332,8 +336,67 @@ load_plugins {
     zellij-tab-namer
 }
 """
-        with self.assertRaises(InstallError):
-            wire_zellij_config(config, Path("/tmp/zellij-tab-namer.wasm"), 24)
+        wired, changed = wire_zellij_config(
+            config,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            llm_base_url="http://127.0.0.1:11434/v1",
+            llm_model="llama3.2",
+        )
+
+        self.assertTrue(changed)
+        self.assertIn("max_chars 24", wired)
+        self.assertIn('unknown_setting "keep me" // user-owned', wired)
+        self.assertIn('llm_base_url "http://127.0.0.1:11434/v1"', wired)
+        self.assertIn('llm_model "llama3.2"', wired)
+        self.assertEqual(wired.count("llm_base_url"), 1)
+        self.assertEqual(wired.count("llm_model"), 1)
+
+    def test_wire_zellij_config_llm_intent_is_tri_state(self):
+        wasm_path = Path("/tmp/zellij-tab-namer.wasm").resolve(strict=False)
+        config = """plugins {
+    zellij-tab-namer location=%s {
+        max_chars 24
+        llm_base_url "http://localhost:11434/v1"
+        llm_model "llama3.2"
+        unknown_setting true
+    }
+}
+
+load_plugins {
+    zellij-tab-namer
+}
+""" % json.dumps(f"file:{wasm_path}")
+
+        preserved, preserved_changed = wire_zellij_config(config, wasm_path, 24)
+        disabled, disabled_changed = wire_zellij_config(
+            config, wasm_path, 24, no_llm=True
+        )
+        disabled_again, disabled_again_changed = wire_zellij_config(
+            disabled, wasm_path, 24, no_llm=True
+        )
+
+        self.assertFalse(preserved_changed)
+        self.assertEqual(preserved, config)
+        self.assertTrue(disabled_changed)
+        self.assertNotIn("llm_base_url", disabled)
+        self.assertNotIn("llm_model", disabled)
+        self.assertIn("unknown_setting true", disabled)
+        self.assertFalse(disabled_again_changed)
+        self.assertEqual(disabled_again, disabled)
+
+    def test_shared_loopback_url_fixture_matches_installer(self):
+        fixture = Path(__file__).parent / "fixtures" / "loopback_url_cases.json"
+        for case in json.loads(fixture.read_text(encoding="utf-8")):
+            with self.subTest(url=case["input"]):
+                if case["valid"]:
+                    self.assertEqual(
+                        normalize_llm_base_url(case["input"]),
+                        case["normalized"],
+                    )
+                else:
+                    with self.assertRaises(InstallError):
+                        normalize_llm_base_url(case["input"])
 
     def test_wire_zellij_config_keeps_commented_load_entry_idempotent(self):
         wasm_path = Path("/tmp/zellij-tab-namer.wasm").resolve(strict=False)
@@ -409,11 +472,12 @@ load_plugins {{
         updated, changed = update_permission_grants(
             "",
             Path("/tmp/plugins/zellij-tab-namer.wasm"),
-            ["RunCommand", "OpenTerminalsOrPlugins", "RunActionsAsUser"],
+            ["RunCommands", "WebAccess", "OpenTerminalsOrPlugins", "RunActionsAsUser"],
         )
 
         self.assertTrue(changed)
-        self.assertIn("RunCommand", updated)
+        self.assertIn("RunCommands", updated)
+        self.assertIn("WebAccess", updated)
         self.assertIn("OpenTerminalsOrPlugins", updated)
         self.assertIn("RunActionsAsUser", updated)
 
@@ -422,8 +486,133 @@ load_plugins {{
             update_permission_grants(
                 "",
                 Path("/tmp/plugins/zellij-tab-namer.wasm"),
-                ["RunCommands"],
+                ["RunCommand"],
             )
+
+    def test_wasm_install_derives_baseline_and_conditional_web_grants(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as tempdir:
+                paths = make_paths(tempdir)
+                paths.zellij_config_dir.mkdir(parents=True)
+                paths.zellij_config_file.write_text(
+                    "plugins {\n}\n\nload_plugins {\n}\n", encoding="utf-8"
+                )
+                source = write_wasm(Path(tempdir) / "source.wasm")
+                kwargs = (
+                    {
+                        "llm_base_url": "http://localhost:11434/v1",
+                        "llm_model": "llama3.2",
+                    }
+                    if enabled
+                    else {"no_llm": True}
+                )
+
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        freeze_permissions=False,
+                        paths=paths,
+                        **kwargs,
+                    )
+                )
+
+                self.assertEqual(result.status, "complete")
+                permissions = paths.permissions_file.read_text(encoding="utf-8")
+                self.assertIn("ReadApplicationState", permissions)
+                self.assertIn("ChangeApplicationState", permissions)
+                self.assertEqual("WebAccess" in permissions, enabled)
+
+    def test_no_llm_removes_managed_nodes_without_revoking_existing_web_grant(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            target = (paths.plugins_dir / "zellij-tab-namer.wasm").resolve(strict=False)
+            paths.zellij_config_file.write_text(
+                """plugins {
+    zellij-tab-namer location=%s {
+        max_chars 32
+        llm_base_url "http://localhost:11434/v1"
+        llm_model "llama3.2"
+        unknown_setting true // preserve
+    }
+}
+
+load_plugins {
+    zellij-tab-namer
+}
+""" % json.dumps(f"file:{target}"),
+                encoding="utf-8",
+            )
+            paths.permissions_file.parent.mkdir(parents=True)
+            paths.permissions_file.write_text(
+                f'{json.dumps(str(target))} {{\n    WebAccess\n}}\n',
+                encoding="utf-8",
+            )
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            result = install(
+                InstallOptions(
+                    mode="wasm",
+                    wasm_source=source,
+                    no_llm=True,
+                    llm_base_url="https://not-used.example/v1",
+                    freeze_permissions=False,
+                    paths=paths,
+                )
+            )
+
+            self.assertEqual(result.status, "complete")
+            config = paths.zellij_config_file.read_text(encoding="utf-8")
+            permissions = paths.permissions_file.read_text(encoding="utf-8")
+            self.assertNotIn("llm_base_url", config)
+            self.assertNotIn("llm_model", config)
+            self.assertIn("unknown_setting true // preserve", config)
+            self.assertIn("WebAccess", permissions)
+
+    def test_invalid_or_partial_llm_configuration_blocks_before_writes(self):
+        for llm_base_url, llm_model in (
+            ("http://localhost:11434/v1", None),
+            (None, "llama3.2"),
+            ("https://localhost:11434/v1", "llama3.2"),
+        ):
+            with self.subTest(base=llm_base_url, model=llm_model), tempfile.TemporaryDirectory() as tempdir:
+                paths = make_paths(tempdir)
+                paths.zellij_config_dir.mkdir(parents=True)
+                original = "plugins {\n}\n\nload_plugins {\n}\n"
+                paths.zellij_config_file.write_text(original, encoding="utf-8")
+                source = write_wasm(Path(tempdir) / "source.wasm")
+
+                with self.assertRaises(InstallError):
+                    install(
+                        InstallOptions(
+                            mode="wasm",
+                            wasm_source=source,
+                            llm_base_url=llm_base_url,
+                            llm_model=llm_model,
+                            freeze_permissions=False,
+                            paths=paths,
+                        )
+                    )
+
+                self.assertEqual(paths.zellij_config_file.read_text(encoding="utf-8"), original)
+                self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+                self.assertFalse(paths.permissions_file.exists())
+
+    def test_cli_only_install_preserves_existing_remote_provider_support(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            result = install(
+                InstallOptions(
+                    mode="cli",
+                    dry_run=True,
+                    llm_base_url="https://api.example.com/v1",
+                    llm_model="remote-model",
+                    paths=paths,
+                )
+            )
+
+            self.assertEqual(result.status, "complete")
 
     def test_wasm_apply_installs_artifact_config_and_permissions(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1072,9 +1261,9 @@ load_plugins {{
                 ]
                 self.assertEqual(len(permission_records), 1)
                 self.assertFalse(permission_records[0]["immutable"])
-                self.assertEqual(
+                self.assertIn(
+                    "ChangeApplicationState",
                     paths.permissions_file.read_text(encoding="utf-8"),
-                    original_permissions,
                 )
 
                 applied = rollback(paths=paths)

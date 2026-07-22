@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -38,7 +39,7 @@ KNOWN_ZELLIJ_PERMISSIONS = frozenset(
         "ReadApplicationState",
         "ChangeApplicationState",
         "OpenFiles",
-        "RunCommand",
+        "RunCommands",
         "OpenTerminalsOrPlugins",
         "WriteToStdin",
         "Reconfigure",
@@ -49,6 +50,9 @@ KNOWN_ZELLIJ_PERMISSIONS = frozenset(
         "RunActionsAsUser",
         "WriteToClipboard",
         "ReadSessionEnvironmentVariables",
+        "WebAccess",
+        "ReadCliPipes",
+        "MessageAndLaunchOtherPlugins",
     }
 )
 _SHA256_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
@@ -104,7 +108,7 @@ class InstallOptions:
     dry_run: bool = False
     max_chars: int = 32
     interval: float = 2.0
-    no_llm: bool = False
+    no_llm: Optional[bool] = None
     llm_base_url: Optional[str] = None
     llm_model: Optional[str] = None
     zellij_bin: str = "zellij"
@@ -307,7 +311,59 @@ def build_verification_command(options: InstallOptions) -> List[str]:
     return command
 
 
-def wire_zellij_config(config_text: str, wasm_path: Path, max_chars: int) -> Tuple[str, bool]:
+def normalize_llm_base_url(base_url: str) -> str:
+    value = base_url.strip()
+    if (
+        not value
+        or len(value) > 2048
+        or any(char.isspace() or ord(char) < 32 for char in value)
+    ):
+        raise InstallError("native LLM base URL must be a bounded loopback HTTP URL")
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise InstallError("native LLM base URL is invalid") from exc
+    if (
+        parsed.scheme != "http"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise InstallError("native LLM base URL must be unauthenticated loopback HTTP")
+    host = parsed.hostname
+    if host is None:
+        raise InstallError("native LLM base URL must include a loopback host")
+    try:
+        loopback = host.lower() == "localhost" or ipaddress.ip_address(host) in (
+            ipaddress.ip_address("127.0.0.1"),
+            ipaddress.ip_address("::1"),
+        )
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    if not loopback:
+        raise InstallError("native LLM base URL must use localhost, 127.0.0.1, or [::1]")
+
+    authority = host if ":" not in host else f"[{host}]"
+    if port is not None:
+        authority = f"{authority}:{port}"
+    path = parsed.path.rstrip("/")
+    if path not in ("", "/v1"):
+        raise InstallError("native LLM base URL path must be empty or /v1")
+    completion_path = f"{path}/chat/completions" if path else "/chat/completions"
+    return f"http://{authority}{completion_path}"
+
+
+def wire_zellij_config(
+    config_text: str,
+    wasm_path: Path,
+    max_chars: int,
+    llm_base_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    no_llm: Optional[bool] = None,
+) -> Tuple[str, bool]:
     if not _balanced_kdl(config_text):
         raise InstallError("config.kdl appears malformed; refusing to edit it")
 
@@ -319,9 +375,16 @@ def wire_zellij_config(config_text: str, wasm_path: Path, max_chars: int) -> Tup
         )
 
     plugin_url = _plugin_url(wasm_path)
+    llm_lines = ""
+    if not no_llm and llm_base_url is not None and llm_model is not None:
+        llm_lines = (
+            f"        llm_base_url {_kdl_string(llm_base_url)}\n"
+            f"        llm_model {_kdl_string(llm_model)}\n"
+        )
     alias_entry = (
         f"    {PLUGIN_ALIAS} location={_kdl_string(plugin_url)} {{\n"
         f"        max_chars {max_chars}\n"
+        f"{llm_lines}"
         "    }\n"
     )
     changed = False
@@ -333,13 +396,25 @@ def wire_zellij_config(config_text: str, wasm_path: Path, max_chars: int) -> Tup
         changed = True
     else:
         alias_text = next_text[alias_block[0] : alias_block[1]]
-        if (
-            _kdl_string(plugin_url) not in alias_text
-            or not _kdl_node_has_exact_value(alias_text, "max_chars", str(max_chars))
-        ):
-            raise InstallError(
-                "existing zellij-tab-namer plugin alias differs; edit it manually"
+        alias_text = _reconcile_alias_location(alias_text, plugin_url)
+        alias_text = _reconcile_managed_node(alias_text, "max_chars", str(max_chars))
+        if no_llm:
+            alias_text = _remove_managed_node(alias_text, "llm_base_url")
+            alias_text = _remove_managed_node(alias_text, "llm_model")
+        elif llm_base_url is not None and llm_model is not None:
+            alias_text = _reconcile_managed_node(
+                alias_text, "llm_base_url", _kdl_string(llm_base_url)
             )
+            alias_text = _reconcile_managed_node(
+                alias_text, "llm_model", _kdl_string(llm_model)
+            )
+        if alias_text != next_text[alias_block[0] : alias_block[1]]:
+            next_text = (
+                next_text[: alias_block[0]]
+                + alias_text
+                + next_text[alias_block[1] :]
+            )
+            changed = True
 
     load_block = _find_named_block(next_text, "load_plugins")
     if load_block is None:
@@ -539,6 +614,13 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
                 should_freeze_permissions,
             )
 
+            _validate_applied_wasm_changes(
+                options,
+                target,
+                changes,
+                should_freeze_permissions,
+            )
+
         result.runtime_status[MODE_WASM] = "complete"
         result.operations.extend(
             [
@@ -583,24 +665,28 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
         config_text,
         target,
         options.max_chars,
+        llm_base_url=options.llm_base_url,
+        llm_model=options.llm_model,
+        no_llm=options.no_llm,
     )
 
-    next_permissions = None
-    permissions_changed = False
-    if options.wasm_permissions:
-        permissions_path = options.paths.permissions_file
-        _refuse_symlink_target(permissions_path)
-        try:
-            permissions_text = permissions_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            permissions_text = ""
-        except OSError as exc:
-            raise InstallError(f"failed to read permissions.kdl: {exc}") from exc
-        next_permissions, permissions_changed = update_permission_grants(
-            permissions_text,
-            target,
-            options.wasm_permissions,
-        )
+    permissions_path = options.paths.permissions_file
+    _refuse_symlink_target(permissions_path)
+    try:
+        permissions_text = permissions_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        permissions_text = ""
+    except OSError as exc:
+        raise InstallError(f"failed to read permissions.kdl: {exc}") from exc
+    effective_grants = ["ReadApplicationState", "ChangeApplicationState"]
+    effective_grants.extend(options.wasm_permissions)
+    if not options.no_llm and _native_llm_configured(next_config):
+        effective_grants.append("WebAccess")
+    next_permissions, permissions_changed = update_permission_grants(
+        permissions_text,
+        target,
+        effective_grants,
+    )
     return WasmChanges(
         config_path=config_path,
         next_config=next_config,
@@ -622,6 +708,40 @@ def _describe_wasm_source(options: InstallOptions) -> str:
         _validate_wasm_file(source, options.wasm_sha256)
         return f"copy {source}"
     raise InstallError("WASM source not provided")
+
+
+def _validate_applied_wasm_changes(
+    options: InstallOptions,
+    target: Path,
+    changes: WasmChanges,
+    permissions_should_be_immutable: bool,
+) -> None:
+    _validate_wasm_file(target, None)
+    try:
+        actual_config = changes.config_path.read_text(encoding="utf-8")
+        actual_permissions = changes.permissions_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InstallError(f"failed to verify applied WASM configuration: {exc}") from exc
+    if actual_config != changes.next_config:
+        raise InstallError("config.kdl changed while the WASM install was being verified")
+    _, config_changed = wire_zellij_config(
+        actual_config,
+        target,
+        options.max_chars,
+        llm_base_url=options.llm_base_url,
+        llm_model=options.llm_model,
+        no_llm=options.no_llm,
+    )
+    if config_changed:
+        raise InstallError("final config.kdl did not satisfy the managed plugin contract")
+    if changes.next_permissions is None or actual_permissions != changes.next_permissions:
+        raise InstallError("permissions.kdl changed while the WASM install was being verified")
+    if (
+        _permissions_freeze_supported()
+        and _is_user_immutable(changes.permissions_path)
+        != permissions_should_be_immutable
+    ):
+        raise InstallError("permissions.kdl immutable flag does not match requested state")
 
 
 def _resolve_wasm_source(options: InstallOptions) -> Tuple[Path, Optional[Path]]:
@@ -1094,14 +1214,28 @@ def _mode_includes(mode: str, runtime: str) -> bool:
 
 
 def _normalize_options(options: InstallOptions) -> InstallOptions:
+    base_url_provided = options.llm_base_url is not None
+    model_provided = options.llm_model is not None
+    llm_base_url = options.llm_base_url.strip() if base_url_provided else None
+    llm_model = options.llm_model.strip() if model_provided else None
+    if options.no_llm:
+        llm_base_url = None
+        llm_model = None
+    elif base_url_provided != model_provided:
+        raise InstallError("--llm-base-url and --llm-model must be provided together")
+    elif base_url_provided:
+        if not llm_base_url or not llm_model:
+            raise InstallError("--llm-base-url and --llm-model must not be empty")
+        if _mode_includes(options.mode, MODE_WASM):
+            normalize_llm_base_url(llm_base_url)
     return InstallOptions(
         mode=options.mode,
         dry_run=options.dry_run,
         max_chars=options.max_chars,
         interval=options.interval,
         no_llm=options.no_llm,
-        llm_base_url=options.llm_base_url,
-        llm_model=options.llm_model,
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
         zellij_bin=options.zellij_bin,
         command_name=options.command_name,
         wasm_source=_normalize_path(options.wasm_source) if options.wasm_source else None,
@@ -1263,6 +1397,74 @@ def _insert_before_block_close(
     if prefix and not prefix.endswith("\n"):
         prefix += "\n"
     return prefix + addition + suffix
+
+
+def _reconcile_alias_location(alias_text: str, plugin_url: str) -> str:
+    pattern = re.compile(
+        r'(?m)^(\s*'
+        + re.escape(PLUGIN_ALIAS)
+        + r'\s+[^\n]*?\blocation=)"(?:\\.|[^"\\])*"'
+    )
+    matches = list(pattern.finditer(alias_text))
+    if len(matches) != 1:
+        raise InstallError("existing zellij-tab-namer alias has an unsupported location")
+    return pattern.sub(r"\g<1>" + _kdl_string(plugin_url), alias_text, count=1)
+
+
+def _managed_node_pattern(node: str) -> re.Pattern[str]:
+    return re.compile(
+        rf'(?m)^(?P<indent>[ \t]*){re.escape(node)}[ \t]+'
+        r'(?P<value>"(?:\\.|[^"\\])*"|[^\s/]+)'
+        r'(?P<suffix>[ \t]*(?://[^\n]*)?)(?P<newline>\n|$)'
+    )
+
+
+def _reconcile_managed_node(alias_text: str, node: str, value: str) -> str:
+    pattern = _managed_node_pattern(node)
+    matches = list(pattern.finditer(alias_text))
+    if len(matches) > 1:
+        raise InstallError(f"plugin alias contains multiple {node} nodes")
+    if matches:
+        match = matches[0]
+        replacement = (
+            f"{match.group('indent')}{node} {value}"
+            f"{match.group('suffix')}{match.group('newline')}"
+        )
+        return alias_text[: match.start()] + replacement + alias_text[match.end() :]
+    return _insert_before_block_close(
+        alias_text,
+        (0, len(alias_text)),
+        f"        {node} {value}\n",
+    )
+
+
+def _remove_managed_node(alias_text: str, node: str) -> str:
+    pattern = _managed_node_pattern(node)
+    matches = list(pattern.finditer(alias_text))
+    if len(matches) > 1:
+        raise InstallError(f"plugin alias contains multiple {node} nodes")
+    return pattern.sub("", alias_text, count=1)
+
+
+def _native_llm_configured(config_text: str) -> bool:
+    plugins_block = _find_named_block(config_text, "plugins")
+    if plugins_block is None:
+        return False
+    alias_block = _find_plugin_alias_block(config_text, plugins_block)
+    if alias_block is None:
+        return False
+    alias_text = config_text[alias_block[0] : alias_block[1]]
+    base_matches = list(_managed_node_pattern("llm_base_url").finditer(alias_text))
+    model_matches = list(_managed_node_pattern("llm_model").finditer(alias_text))
+    if len(base_matches) != 1 or len(model_matches) != 1:
+        return False
+    try:
+        base_url = json.loads(base_matches[0].group("value"))
+        model = json.loads(model_matches[0].group("value"))
+        normalize_llm_base_url(base_url)
+    except (InstallError, json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(model, str) and bool(model.strip())
 
 
 def _kdl_node_has_exact_value(text: str, node: str, value: str) -> bool:

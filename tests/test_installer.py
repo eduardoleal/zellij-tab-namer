@@ -395,6 +395,36 @@ load_plugins {
             self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
             self.assertFalse(paths.manifest_file.exists())
 
+    def test_wasm_refuses_symlinked_plugin_target_before_resolving(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            (paths.zellij_config_dir / "config.kdl").write_text(
+                "plugins {\n}\n\nload_plugins {\n}\n",
+                encoding="utf-8",
+            )
+            paths.plugins_dir.mkdir(parents=True)
+            outside_plugin = Path(tempdir) / "outside.wasm"
+            outside_plugin.write_bytes(b"\0asmoutside")
+            plugin_target = paths.plugins_dir / "zellij-tab-namer.wasm"
+            plugin_target.symlink_to(outside_plugin)
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            result = install(
+                InstallOptions(
+                    mode="wasm",
+                    wasm_source=source,
+                    freeze_permissions=False,
+                    paths=paths,
+                )
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIn("managed install target is a symlink", "\n".join(result.messages))
+            self.assertTrue(plugin_target.is_symlink())
+            self.assertEqual(outside_plugin.read_bytes(), b"\0asmoutside")
+            self.assertFalse(paths.manifest_file.exists())
+
     def test_wasm_dry_run_url_does_not_download_or_write_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)

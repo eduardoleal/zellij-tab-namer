@@ -434,7 +434,7 @@ def _install_cli(options: InstallOptions, result: InstallResult) -> None:
 
 
 def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
-    target = _normalize_path(options.paths.plugins_dir / PLUGIN_FILENAME)
+    target = options.paths.plugins_dir / PLUGIN_FILENAME
     if options.wasm_source and options.wasm_url:
         _block_runtime(
             result,
@@ -456,6 +456,7 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
 
     downloaded: Optional[Path] = None
     try:
+        _refuse_symlink_target(target)
         wasm_source = _describe_wasm_source(options)
         changes = _plan_wasm_changes(options, target)
         if options.dry_run:

@@ -83,7 +83,12 @@ class InstallPaths:
             xdg_state_home
             or Path(os.environ.get("XDG_STATE_HOME", resolved_home / ".local/state"))
         )
-        zellij_config_dir = config_root / "zellij"
+        zellij_config_env = os.environ.get("ZELLIJ_CONFIG_DIR")
+        zellij_config_dir = (
+            _normalize_path(Path(zellij_config_env))
+            if zellij_config_env
+            else config_root / "zellij"
+        )
         tab_namer_config_dir = config_root / "zellij-tab-namer"
         return cls(
             zellij_config_dir=zellij_config_dir,
@@ -333,7 +338,7 @@ def wire_zellij_config(config_text: str, wasm_path: Path, max_chars: int) -> Tup
         alias_text = next_text[alias_block[0] : alias_block[1]]
         if (
             _kdl_string(plugin_url) not in alias_text
-            or f"max_chars {max_chars}" not in alias_text
+            or not _kdl_node_has_exact_value(alias_text, "max_chars", str(max_chars))
         ):
             raise InstallError(
                 "existing zellij-tab-namer plugin alias differs; edit it manually"
@@ -1205,6 +1210,16 @@ def _insert_before_block_close(
     if prefix and not prefix.endswith("\n"):
         prefix += "\n"
     return prefix + addition + suffix
+
+
+def _kdl_node_has_exact_value(text: str, node: str, value: str) -> bool:
+    return (
+        re.search(
+            rf"(?m)^\s*{re.escape(node)}\s+{re.escape(value)}\s*$",
+            text,
+        )
+        is not None
+    )
 
 
 def _matching_brace(text: str, open_index: int) -> Optional[int]:

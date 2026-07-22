@@ -68,6 +68,26 @@ class InstallerTests(unittest.TestCase):
                 xdg_cache.resolve(strict=False) / "zellij" / "permissions.kdl",
             )
 
+    def test_defaults_respect_zellij_config_dir_env(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            zellij_config_dir = root / "custom-zellij"
+            with patch.dict(
+                os.environ,
+                {"ZELLIJ_CONFIG_DIR": str(zellij_config_dir)},
+                clear=True,
+            ):
+                paths = InstallPaths.defaults(home=root)
+
+            self.assertEqual(
+                paths.zellij_config_dir,
+                zellij_config_dir.resolve(strict=False),
+            )
+            self.assertEqual(
+                paths.tab_namer_config_dir,
+                root.resolve(strict=False) / ".config" / "zellij-tab-namer",
+            )
+
     def test_cli_dry_run_plans_config_without_writing(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)
@@ -190,6 +210,20 @@ load_plugins {
         self.assertEqual(rewired.count("zellij-tab-namer location="), 1)
         self.assertEqual(rewired.count("\n    zellij-tab-namer\n"), 1)
         self.assertIn('autolock location="file:/tmp/autolock.wasm"', rewired)
+
+    def test_wire_zellij_config_rejects_partial_max_chars_match(self):
+        config = """plugins {
+    zellij-tab-namer location="file:/tmp/zellij-tab-namer.wasm" {
+        max_chars 240
+    }
+}
+
+load_plugins {
+    zellij-tab-namer
+}
+"""
+        with self.assertRaises(InstallError):
+            wire_zellij_config(config, Path("/tmp/zellij-tab-namer.wasm"), 24)
 
     def test_permission_grants_are_added_and_idempotent(self):
         permissions = '''"file:/wrong-prefix" {

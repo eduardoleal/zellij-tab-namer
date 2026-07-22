@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = "2.5"
 zellij-tile = "=0.44.0"
 
 [[bin]]
@@ -20,4 +23,3 @@ lto = true
 strip = true
 codegen-units = 1
 opt-level = "s"
-

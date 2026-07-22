@@ -2528,6 +2528,9 @@ dependencies = [
 name = "zellij-tab-namer"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "url",
  "zellij-tile",
 ]
 

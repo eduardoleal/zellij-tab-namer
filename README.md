@@ -13,23 +13,59 @@ deterministic local labels when model refinement is disabled or unavailable.
 
 ## Install
 
-From this checkout:
+Because the repository is private, authenticate the GitHub CLI before cloning.
+Run `gh auth login` first if `gh auth status` reports that you are not logged in:
 
 ```sh
-python3 -m pip install -e .
+gh auth status
+gh repo clone eduardoleal/zellij-tab-namer
+cd zellij-tab-namer
 ```
 
-The Python package has no runtime dependencies outside the standard library.
-The repository installer installs the package and then runs its setup command:
+### Released native WASM plugin
+
+Use the authenticated GitHub CLI session to download the prebuilt `v0.1.0`
+plugin and its checksum.
 
 ```sh
-./install.sh --dry-run
+mkdir -p /tmp/zellij-tab-namer-v0.1.0
+gh release download v0.1.0 \
+  --repo eduardoleal/zellij-tab-namer \
+  --pattern 'zellij-tab-namer.wasm*' \
+  --dir /tmp/zellij-tab-namer-v0.1.0 \
+  --clobber
+
+(cd /tmp/zellij-tab-namer-v0.1.0 && \
+  shasum -a 256 -c zellij-tab-namer.wasm.sha256)
+
+./install.sh --mode wasm \
+  --wasm-source /tmp/zellij-tab-namer-v0.1.0/zellij-tab-namer.wasm \
+  --wasm-sha256 31b074209af582f580f5c1af0763739a4b3ca9d9c60828823ad49d8505aee5b3 \
+  --wasm-permission ReadApplicationState \
+  --wasm-permission ChangeApplicationState
+```
+
+The checksum command and installer both verify the release before changing
+Zellij configuration. The release assets are available from the
+[`v0.1.0` release](https://github.com/eduardoleal/zellij-tab-namer/releases/tag/v0.1.0).
+Start a fresh Zellij session after installation so the plugin and pre-granted
+permissions are loaded.
+
+### Python watcher
+
+Install the dependency-free Python watcher instead:
+
+```sh
 ./install.sh --mode cli
 ```
 
-For local development, set `ZELLIJ_TAB_NAMER_EDITABLE=1` before running the
-script to request an editable install. `zellij-tab-namer install` defaults to
-`--mode both`; a native install also needs a local or downloaded WASM artifact.
+The installer script installs the Python package and then runs the selected
+setup mode. For local development, set `ZELLIJ_TAB_NAMER_EDITABLE=1` to request
+an editable package install. The package has no runtime dependencies outside
+the Python standard library.
+
+`zellij-tab-namer install` defaults to `--mode both`, but the WASM path is
+skipped unless `--wasm-source` or `--wasm-url` is provided.
 
 ## Python watcher
 
@@ -105,6 +141,9 @@ flight. Native manual protection lasts for that tab's lifetime; open a new tab
 to resume automatic naming for that work.
 
 ### Build and install without native Ollama
+
+To build instead of using a release, compile the native plugin with Cargo and
+install the resulting artifact:
 
 ```sh
 rustup target add wasm32-wasip1

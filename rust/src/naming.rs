@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 
-use crate::llm::{normalize_source, validate_chat_response, MAX_SOURCE_BYTES};
+use crate::llm::{normalize_source, validate_chat_response, ResponseError, MAX_SOURCE_BYTES};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneSnapshot {
@@ -19,65 +20,26 @@ pub enum RenameDecision {
     NoCandidate,
 }
 
-#[derive(Default)]
-pub struct NamingState {
-    generated: HashMap<usize, String>,
-}
-
-impl NamingState {
-    pub fn decision(
-        &mut self,
-        tab_id: usize,
-        current_name: &str,
-        pane: &PaneSnapshot,
-        max_chars: usize,
-    ) -> RenameDecision {
-        let candidate = label_for_pane(pane, max_chars);
-        if candidate.is_empty() {
-            return RenameDecision::NoCandidate;
-        }
-
-        let last_generated = self.generated.get(&tab_id);
-        let is_manual = !is_default_tab_name(current_name)
-            && last_generated.map(String::as_str) != Some(current_name)
-            && current_name != candidate;
-        if is_manual {
-            return RenameDecision::SkipManual;
-        }
-
-        self.generated.insert(tab_id, candidate.clone());
-        if current_name == candidate {
-            RenameDecision::AlreadyNamed
-        } else {
-            RenameDecision::Rename(candidate)
-        }
-    }
-
-    pub fn retain_tabs(&mut self, active_tab_ids: &[usize]) {
-        self.generated
-            .retain(|tab_id, _| active_tab_ids.contains(tab_id));
-    }
-}
-
 const MAX_GLOBAL_REQUESTS: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScheduledRefinement {
     pub request_id: u64,
-    pub tab_id: usize,
-    pub generation: u64,
     pub source: String,
     pub max_chars: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct RefinementDecision {
+    pub generation: u64,
     pub rename: RenameDecision,
     pub requests: Vec<ScheduledRefinement>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RefinementCompletion {
+    pub recognized: bool,
+    pub response_error: Option<ResponseError>,
     pub rename: Option<(usize, String)>,
     pub requests: Vec<ScheduledRefinement>,
 }
@@ -94,6 +56,7 @@ struct QueuedRefinement {
 struct RefinementTab {
     generation: u64,
     source: String,
+    source_is_eligible: bool,
     generated: String,
     observed_name: String,
     max_chars: usize,
@@ -130,7 +93,7 @@ impl RefinementCoordinator {
         max_chars: usize,
         enabled: bool,
     ) -> RefinementDecision {
-        let source = normalize_source(source);
+        let (source, source_is_eligible) = retained_source_identity(source);
         let source_changed = self
             .tabs
             .get(&tab_id)
@@ -152,6 +115,7 @@ impl RefinementCoordinator {
                 RefinementTab {
                     generation,
                     source: source.clone(),
+                    source_is_eligible,
                     generated: fallback.to_owned(),
                     observed_name: current_name.to_owned(),
                     max_chars,
@@ -187,6 +151,7 @@ impl RefinementCoordinator {
 
         self.queue_if_eligible(tab_id);
         RefinementDecision {
+            generation: self.tabs[&tab_id].generation,
             rename,
             requests: self.dispatch_queued(),
         }
@@ -197,6 +162,14 @@ impl RefinementCoordinator {
             return RefinementCompletion::default();
         };
 
+        let response = validate_chat_response(
+            status,
+            body,
+            self.tabs
+                .get(&request.tab_id)
+                .map_or(0, |tab| tab.max_chars),
+        );
+        let response_error = response.as_ref().err().cloned();
         let mut rename = None;
         if let Some(tab) = self.tabs.get_mut(&request.tab_id) {
             if tab.in_flight == Some(request_id) {
@@ -206,10 +179,10 @@ impl RefinementCoordinator {
                 tab.terminal = true;
                 tab.queued = None;
                 if tab.enabled && !tab.manual && tab.observed_name == tab.generated {
-                    if let Ok(label) = validate_chat_response(status, body, tab.max_chars) {
-                        if label != tab.generated {
-                            tab.generated = label.clone();
-                            rename = Some((request.tab_id, label));
+                    if let Ok(label) = &response {
+                        if label.as_str() != tab.generated {
+                            tab.generated.clone_from(label);
+                            rename = Some((request.tab_id, label.clone()));
                         }
                     }
                 }
@@ -217,6 +190,8 @@ impl RefinementCoordinator {
         }
 
         RefinementCompletion {
+            recognized: true,
+            response_error,
             rename,
             requests: self.dispatch_queued(),
         }
@@ -258,8 +233,8 @@ impl RefinementCoordinator {
             && !tab.manual
             && !tab.terminal
             && tab.observed_name == tab.generated
+            && tab.source_is_eligible
             && !tab.source.is_empty()
-            && tab.source.len() <= MAX_SOURCE_BYTES
             && tab.source.chars().count() > tab.max_chars
             && tab.max_chars > 0;
         if !eligible {
@@ -270,19 +245,11 @@ impl RefinementCoordinator {
             tab.queued = None;
             return;
         }
-        if tab.in_flight.is_none() && tab.queued.is_none() {
-            self.next_queue_sequence = self.next_queue_sequence.wrapping_add(1).max(1);
-            tab.queued = Some(QueuedRefinement {
-                generation: tab.generation,
-                source: tab.source.clone(),
-                max_chars: tab.max_chars,
-                sequence: self.next_queue_sequence,
-            });
-        } else if let Some(queued) = &mut tab.queued {
+        if let Some(queued) = &mut tab.queued {
             queued.generation = tab.generation;
             queued.source.clone_from(&tab.source);
             queued.max_chars = tab.max_chars;
-        } else if tab.in_flight.is_some() {
+        } else {
             self.next_queue_sequence = self.next_queue_sequence.wrapping_add(1).max(1);
             tab.queued = Some(QueuedRefinement {
                 generation: tab.generation,
@@ -326,14 +293,26 @@ impl RefinementCoordinator {
             );
             dispatched.push(ScheduledRefinement {
                 request_id,
-                tab_id,
-                generation: queued.generation,
                 source: queued.source,
                 max_chars: queued.max_chars,
             });
         }
         dispatched
     }
+}
+
+fn retained_source_identity(source: &str) -> (String, bool) {
+    let normalized = normalize_source(source);
+    if normalized.len() <= MAX_SOURCE_BYTES {
+        return (normalized, true);
+    }
+
+    let mut hasher = DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    (
+        format!("oversized:{}:{:016x}", normalized.len(), hasher.finish()),
+        false,
+    )
 }
 
 fn is_manual_name(current_name: &str, generated: Option<&str>, fallback: &str) -> bool {
@@ -445,7 +424,7 @@ fn looks_like_path(value: &str) -> bool {
 }
 
 fn shorten_label(label: &str, max_chars: usize) -> String {
-    let normalized = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalize_source(label);
     let length = normalized.chars().count();
     if max_chars == 0 {
         return String::new();
@@ -528,41 +507,6 @@ mod tests {
         assert_eq!(
             choose_pane(&[floating, task]).unwrap().title,
             "Fix permission cache"
-        );
-    }
-
-    #[test]
-    fn manual_name_is_preserved_until_cleared() {
-        let mut state = NamingState::default();
-        let input = pane("New task title", "codex", "/tmp/project");
-
-        assert_eq!(
-            state.decision(4, "prod deploy", &input, 32),
-            RenameDecision::SkipManual
-        );
-        assert_eq!(
-            state.decision(4, "Tab #5", &input, 32),
-            RenameDecision::Rename("New task title".into())
-        );
-    }
-
-    #[test]
-    fn generated_names_update_without_churn() {
-        let mut state = NamingState::default();
-        let first = pane("First task", "codex", "/tmp/project");
-        let second = pane("Second task", "codex", "/tmp/project");
-
-        assert_eq!(
-            state.decision(5, "Tab #6", &first, 32),
-            RenameDecision::Rename("First task".into())
-        );
-        assert_eq!(
-            state.decision(5, "First task", &first, 32),
-            RenameDecision::AlreadyNamed
-        );
-        assert_eq!(
-            state.decision(5, "First task", &second, 32),
-            RenameDecision::Rename("Second task".into())
         );
     }
 
@@ -863,5 +807,8 @@ mod tests {
             .reconcile(32, "Tab #1", &oversized, "oversized...", 10, true)
             .requests
             .is_empty());
+        let retained = &coordinator.tabs[&32].source;
+        assert!(retained.len() < 64);
+        assert!(retained.starts_with("oversized:"));
     }
 }

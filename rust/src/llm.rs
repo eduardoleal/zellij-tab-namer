@@ -26,7 +26,7 @@ pub enum RequestError {
     Serialization,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResponseError {
     HttpStatus,
     OversizedBody,
@@ -158,8 +158,11 @@ pub fn validate_chat_response(
         .first()
         .and_then(|choice| choice.message.as_ref())
         .and_then(|message| message.content.as_deref())
-        .map(str::trim)
         .ok_or(ResponseError::MissingContent)?;
+    if content.chars().any(is_forbidden_label_character) {
+        return Err(ResponseError::InvalidLabel);
+    }
+    let content = content.trim();
     if !is_valid_label(content, max_chars) {
         return Err(ResponseError::InvalidLabel);
     }
@@ -267,6 +270,8 @@ mod tests {
         for content in [
             "",
             "two\nlines",
+            "\nleading newline",
+            "trailing newline\n",
             "too many characters",
             "hidden\u{200b}text",
             "bidi\u{202e}",

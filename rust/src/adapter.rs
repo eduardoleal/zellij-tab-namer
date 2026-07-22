@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::llm::{
-    build_chat_request, chat_completions_url, validate_chat_response, OllamaConfig, ResponseError,
-};
+use crate::llm::{build_chat_request, chat_completions_url, OllamaConfig, ResponseError};
 use crate::naming::{RefinementCoordinator, RenameDecision, ScheduledRefinement};
 
 const DEFAULT_MAX_CHARS: usize = 32;
@@ -94,10 +92,7 @@ pub struct Adapter {
     config: NativeConfig,
     permission: WebPermission,
     coordinator: RefinementCoordinator,
-    request_generations: HashMap<u64, u64>,
-    diagnostic_generations: HashMap<usize, (String, u64)>,
-    next_diagnostic_generation: u64,
-    emitted: HashSet<(usize, u64, DiagnosticCategory)>,
+    diagnostics: HashMap<usize, (u64, HashSet<DiagnosticCategory>)>,
 }
 
 impl Adapter {
@@ -116,10 +111,7 @@ impl Adapter {
             config,
             permission,
             coordinator: RefinementCoordinator::default(),
-            request_generations: HashMap::new(),
-            diagnostic_generations: HashMap::new(),
-            next_diagnostic_generation: 0,
-            emitted: HashSet::new(),
+            diagnostics: HashMap::new(),
         }
     }
 
@@ -154,16 +146,6 @@ impl Adapter {
         source: &str,
         fallback: &str,
     ) -> Vec<Action> {
-        let diagnostic_generation = match self.diagnostic_generations.get(&tab_id) {
-            Some((previous, generation)) if previous == source => *generation,
-            _ => {
-                self.next_diagnostic_generation =
-                    self.next_diagnostic_generation.wrapping_add(1).max(1);
-                self.diagnostic_generations
-                    .insert(tab_id, (source.to_owned(), self.next_diagnostic_generation));
-                self.next_diagnostic_generation
-            }
-        };
         let enabled = self.permission == WebPermission::Granted;
         let decision = self.coordinator.reconcile(
             tab_id,
@@ -180,14 +162,14 @@ impl Adapter {
         if self.config.incomplete_llm {
             self.diagnostic_once(
                 tab_id,
-                diagnostic_generation,
+                decision.generation,
                 DiagnosticCategory::IncompleteConfiguration,
                 &mut actions,
             );
         } else if self.permission == WebPermission::Denied {
             self.diagnostic_once(
                 tab_id,
-                diagnostic_generation,
+                decision.generation,
                 DiagnosticCategory::PermissionDenied,
                 &mut actions,
             );
@@ -199,7 +181,7 @@ impl Adapter {
         {
             self.diagnostic_once(
                 tab_id,
-                diagnostic_generation,
+                decision.generation,
                 DiagnosticCategory::SchedulerSaturated,
                 &mut actions,
             );
@@ -210,10 +192,8 @@ impl Adapter {
 
     pub fn retain_tabs(&mut self, active_tab_ids: &[usize]) -> Vec<Action> {
         let requests = self.coordinator.retain_tabs(active_tab_ids);
-        self.diagnostic_generations
+        self.diagnostics
             .retain(|tab_id, _| active_tab_ids.contains(tab_id));
-        self.emitted
-            .retain(|(tab_id, _, _)| active_tab_ids.contains(tab_id));
         let mut actions = Vec::new();
         self.append_requests(requests, &mut actions);
         actions
@@ -231,20 +211,20 @@ impl Adapter {
         else {
             return Vec::new();
         };
-        let generation = self.request_generations.remove(&request_id).unwrap_or(0);
         let mut actions = Vec::new();
-        if let Err(error) = validate_chat_response(status, body, self.config.max_chars) {
+        let completion = self.coordinator.finish(request_id, status, body);
+        if let Some(error) = completion
+            .response_error
+            .as_ref()
+            .filter(|_| completion.recognized)
+        {
             let category = match error {
                 ResponseError::HttpStatus if status == 0 => DiagnosticCategory::TransportFailure,
                 ResponseError::HttpStatus => DiagnosticCategory::HttpStatus,
                 _ => DiagnosticCategory::ValidationRejected,
             };
-            // A request ID is unique to one generation, so this cannot repeat for that generation.
-            if generation != 0 {
-                actions.push(Action::Diagnostic { category });
-            }
+            actions.push(Action::Diagnostic { category });
         }
-        let completion = self.coordinator.finish(request_id, status, body);
         if let Some((tab_id, label)) = completion.rename {
             actions.push(Action::Rename { tab_id, label });
         }
@@ -259,8 +239,6 @@ impl Adapter {
         for request in requests {
             match build_chat_request(&config, &request.source, request.max_chars) {
                 Ok(chat) => {
-                    self.request_generations
-                        .insert(request.request_id, request.generation);
                     actions.push(Action::WebRequest {
                         url: chat.url,
                         headers: BTreeMap::from([(
@@ -295,7 +273,14 @@ impl Adapter {
         category: DiagnosticCategory,
         actions: &mut Vec<Action>,
     ) {
-        if self.emitted.insert((tab_id, generation, category.clone())) {
+        let entry = self
+            .diagnostics
+            .entry(tab_id)
+            .or_insert_with(|| (generation, HashSet::new()));
+        if entry.0 != generation {
+            *entry = (generation, HashSet::new());
+        }
+        if entry.1.insert(category.clone()) {
             actions.push(Action::Diagnostic { category });
         }
     }

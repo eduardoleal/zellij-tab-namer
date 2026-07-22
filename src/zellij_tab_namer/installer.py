@@ -36,9 +36,18 @@ KNOWN_ZELLIJ_PERMISSIONS = frozenset(
     {
         "ReadApplicationState",
         "ChangeApplicationState",
-        "RunCommands",
-        "MessageAndLaunchOtherPlugins",
-        "ReadCliPipes",
+        "OpenFiles",
+        "RunCommand",
+        "OpenTerminalsOrPlugins",
+        "WriteToStdin",
+        "Reconfigure",
+        "FullHdAccess",
+        "StartWebServer",
+        "InterceptInput",
+        "ReadPaneContents",
+        "RunActionsAsUser",
+        "WriteToClipboard",
+        "ReadSessionEnvironmentVariables",
     }
 )
 _SHA256_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
@@ -496,11 +505,19 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
                 changes.next_permissions,
                 options.paths.backup_dir,
             )
+            should_freeze_permissions = options.freeze_permissions or originally_immutable
+            if permissions_record is None:
+                permissions_record = _record_permissions_metadata_change(
+                    changes.permissions_path,
+                    options.paths.backup_dir,
+                    originally_immutable,
+                    should_freeze_permissions,
+                )
             if permissions_record:
                 result.backups.append(permissions_record)
             _freeze_permissions_file(
                 changes.permissions_path,
-                options.freeze_permissions or originally_immutable,
+                should_freeze_permissions,
             )
 
         result.runtime_status[MODE_WASM] = "complete"
@@ -732,8 +749,36 @@ def _write_permissions_change(
 
 
 def _freeze_permissions_file(path: Path, freeze: bool) -> None:
-    if freeze and path.exists() and not _is_user_immutable(path):
+    if (
+        freeze
+        and _permissions_freeze_supported()
+        and path.exists()
+        and not _is_user_immutable(path)
+    ):
         _set_immutable(path)
+
+
+def _record_permissions_metadata_change(
+    path: Path,
+    backup_dir: Path,
+    originally_immutable: bool,
+    freeze_permissions: bool,
+) -> Optional[BackupRecord]:
+    if (
+        not freeze_permissions
+        or not _permissions_freeze_supported()
+        or not path.exists()
+        or _is_user_immutable(path)
+    ):
+        return None
+    record = _backup_file(path, backup_dir)
+    return BackupRecord(
+        target=str(path),
+        backup=record.backup,
+        existed=True,
+        checksum=_sha256_file(path),
+        immutable=originally_immutable,
+    )
 
 
 def _copy_with_backup(
@@ -1322,6 +1367,10 @@ def _clear_immutable(path: Path) -> None:
 def _set_immutable(path: Path) -> None:
     if platform.system() == "Darwin" and path.exists():
         subprocess.run(["chflags", "uchg", str(path)], check=True)
+
+
+def _permissions_freeze_supported() -> bool:
+    return platform.system() == "Darwin"
 
 
 def _unlink_missing_ok(path: Path) -> None:

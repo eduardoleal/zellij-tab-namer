@@ -213,6 +213,26 @@ load_plugins {
         self.assertEqual(updated_again.count(f'"file:{normalized_path}"'), 1)
         self.assertIn("ChangeApplicationState", updated_again)
 
+    def test_permission_grants_accept_current_zellij_names(self):
+        updated, changed = update_permission_grants(
+            "",
+            Path("/tmp/plugins/zellij-tab-namer.wasm"),
+            ["RunCommand", "OpenTerminalsOrPlugins", "RunActionsAsUser"],
+        )
+
+        self.assertTrue(changed)
+        self.assertIn("RunCommand", updated)
+        self.assertIn("OpenTerminalsOrPlugins", updated)
+        self.assertIn("RunActionsAsUser", updated)
+
+    def test_permission_grants_reject_stale_zellij_names(self):
+        with self.assertRaises(InstallError):
+            update_permission_grants(
+                "",
+                Path("/tmp/plugins/zellij-tab-namer.wasm"),
+                ["RunCommands"],
+            )
+
     def test_wasm_apply_installs_artifact_config_and_permissions(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)
@@ -492,7 +512,10 @@ load_plugins {
             )
             source = write_wasm(Path(tempdir) / "source.wasm")
 
-            with patch.object(
+            with patch(
+                "platform.system",
+                return_value="Darwin",
+            ), patch.object(
                 installer_module,
                 "_set_immutable",
                 side_effect=OSError("simulated chflags failure"),
@@ -549,7 +572,10 @@ load_plugins {
                 if Path(path).resolve(strict=False) == permissions_path:
                     immutable_state["permissions"] = True
 
-            with patch.object(
+            with patch(
+                "platform.system",
+                return_value="Darwin",
+            ), patch.object(
                 installer_module,
                 "_is_user_immutable",
                 side_effect=is_user_immutable,
@@ -581,6 +607,89 @@ load_plugins {
                 ]
                 self.assertEqual(len(permission_records), 1)
                 self.assertFalse(permission_records[0]["immutable"])
+
+                applied = rollback(paths=paths)
+
+            self.assertEqual(applied.status, "complete")
+            self.assertFalse(immutable_state["permissions"])
+            self.assertEqual(
+                paths.permissions_file.read_text(encoding="utf-8"),
+                original_permissions,
+            )
+
+    def test_noop_permission_pregrant_freeze_has_rollback_record(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            (paths.zellij_config_dir / "config.kdl").write_text(
+                "plugins {\n}\n\nload_plugins {\n}\n",
+                encoding="utf-8",
+            )
+            source = write_wasm(Path(tempdir) / "source.wasm")
+            target_url = f"file:{(paths.plugins_dir / 'zellij-tab-namer.wasm').resolve(strict=False)}"
+            original_permissions = (
+                f"{json.dumps(target_url)} {{\n"
+                "    ReadApplicationState\n"
+                "}\n"
+            )
+            paths.permissions_file.parent.mkdir(parents=True)
+            paths.permissions_file.write_text(original_permissions, encoding="utf-8")
+            permissions_path = paths.permissions_file.resolve(strict=False)
+            immutable_state = {"permissions": False}
+
+            def is_user_immutable(path):
+                return (
+                    Path(path).resolve(strict=False) == permissions_path
+                    and immutable_state["permissions"]
+                )
+
+            def clear_immutable(path):
+                if Path(path).resolve(strict=False) == permissions_path:
+                    immutable_state["permissions"] = False
+
+            def set_immutable(path):
+                if Path(path).resolve(strict=False) == permissions_path:
+                    immutable_state["permissions"] = True
+
+            with patch(
+                "platform.system",
+                return_value="Darwin",
+            ), patch.object(
+                installer_module,
+                "_is_user_immutable",
+                side_effect=is_user_immutable,
+            ), patch.object(
+                installer_module,
+                "_clear_immutable",
+                side_effect=clear_immutable,
+            ), patch.object(
+                installer_module,
+                "_set_immutable",
+                side_effect=set_immutable,
+            ):
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        wasm_permissions=("ReadApplicationState",),
+                        paths=paths,
+                    )
+                )
+                self.assertEqual(result.status, "complete")
+                self.assertTrue(immutable_state["permissions"])
+                self.assertTrue(paths.manifest_file.exists())
+                manifest_data = json.loads(paths.manifest_file.read_text(encoding="utf-8"))
+                permission_records = [
+                    record
+                    for record in manifest_data["backups"]
+                    if record["target"] == str(permissions_path)
+                ]
+                self.assertEqual(len(permission_records), 1)
+                self.assertFalse(permission_records[0]["immutable"])
+                self.assertEqual(
+                    paths.permissions_file.read_text(encoding="utf-8"),
+                    original_permissions,
+                )
 
                 applied = rollback(paths=paths)
 

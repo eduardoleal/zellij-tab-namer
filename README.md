@@ -1,10 +1,15 @@
 # zellij-tab-namer
 
-`zellij-tab-namer` names Zellij tabs from the state Zellij already exposes. It
-ships both a dependency-free Python watcher and a native headless WASM plugin.
-Both read pane titles first, protect manual tab names, and use deterministic
-local fallbacks when no useful title is available. The Python watcher can also
-ask an OpenAI-compatible endpoint to compress long labels.
+`zellij-tab-namer` names Zellij tabs from state Zellij already exposes. It has
+two runtime paths:
+
+- The dependency-free **Python watcher** runs as an external process. It can
+  use any OpenAI-compatible endpoint configured through environment variables.
+- The **native headless WASM plugin** runs inside Zellij. Its optional v0.2.0
+  refinement targets unauthenticated Ollama on the local loopback interface.
+
+Both paths prefer pane titles, protect manual tab names, and fall back to
+deterministic local labels when model refinement is disabled or unavailable.
 
 ## Install
 
@@ -14,10 +19,8 @@ From this checkout:
 python3 -m pip install -e .
 ```
 
-The package has no runtime dependencies outside the Python standard library.
-
-The repository also includes an installer script that installs the package and
-then runs the setup command:
+The Python package has no runtime dependencies outside the standard library.
+The repository installer installs the package and then runs its setup command:
 
 ```sh
 ./install.sh --dry-run
@@ -25,72 +28,201 @@ then runs the setup command:
 ```
 
 For local development, set `ZELLIJ_TAB_NAMER_EDITABLE=1` before running the
-script to request an editable install.
+script to request an editable install. `zellij-tab-namer install` defaults to
+`--mode both`; a native install also needs a local or downloaded WASM artifact.
 
-By default `zellij-tab-namer install` uses `--mode both`. Pass the locally built
-artifact with `--wasm-source` when installing the native path.
+## Python watcher
 
-## Usage
-
-Start with a dry run:
+Preview one naming pass:
 
 ```sh
 python3 -m zellij_tab_namer.cli once --dry-run
 ```
 
-Apply names once:
+Apply once or watch continuously:
 
 ```sh
 python3 -m zellij_tab_namer.cli once
-```
-
-Run continuously:
-
-```sh
 python3 -m zellij_tab_namer.cli watch --interval 2
 ```
 
-Useful options:
+Useful watcher options include:
 
 ```sh
 python3 -m zellij_tab_namer.cli once --max-chars 28 --no-llm
 python3 -m zellij_tab_namer.cli once --force
-python3 -m zellij_tab_namer.cli once --state-file ~/.local/state/zellij-tab-namer/state.json
+python3 -m zellij_tab_namer.cli once \
+  --state-file ~/.local/state/zellij-tab-namer/state.json
 ```
 
-`--dry-run` reads live Zellij JSON and prints the planned rename decisions
-without calling `rename-tab-by-id` or updating the generated-name state.
+`--dry-run` reads live Zellij JSON and prints planned decisions without calling
+`rename-tab-by-id` or updating generated-name state. The watcher stores its last
+generated name per tab. A non-default current name that differs from that value
+is treated as a manual override; `--force` deliberately bypasses that protection
+for one run. If the state file is lost, the watcher preserves clear non-default
+names.
 
-## Installer
+### Optional watcher LLM configuration
 
-The installer is safe to run as a dry run first:
+The watcher uses OpenAI-compatible chat completions and reads its configuration
+from the process environment:
 
 ```sh
-zellij-tab-namer install --mode both --dry-run
+export ZELLIJ_TAB_NAMER_BASE_URL="http://localhost:11434/v1"
+export ZELLIJ_TAB_NAMER_MODEL="llama3.2"
+export ZELLIJ_TAB_NAMER_API_KEY="ollama"
+export ZELLIJ_TAB_NAMER_TIMEOUT="0.8"
 ```
 
-CLI mode writes local installer config under
-`~/.config/zellij-tab-namer/config.json`, including the generated watch command
-and verification command. It does not edit `config.kdl` for the Python watcher;
-automatic headless startup belongs to the native WASM plugin path.
+The API key remains an environment variable; it is not written into installer
+configuration. Watcher configuration and behavior are independent of the
+native plugin settings described below.
+
+Install watcher configuration with:
 
 ```sh
-zellij-tab-namer install --mode cli --max-chars 28 --interval 2 --no-llm
+zellij-tab-namer install --mode cli --max-chars 28 --interval 2 \
+  --llm-base-url "http://localhost:11434/v1" \
+  --llm-model "llama3.2"
 ```
 
-Build the native plugin with Cargo and install the resulting artifact:
+CLI mode writes local installer configuration under
+`~/.config/zellij-tab-namer/config.json`, including generated watch and
+verification commands. It does not edit Zellij's `config.kdl`.
+
+## Native WASM plugin
+
+The native plugin subscribes to Zellij pane and tab metadata and renames tabs
+by stable ID. It never reads pane contents or scrollback. It applies a
+deterministic shortened label immediately; when native Ollama is enabled, a
+valid current model result may refine that label asynchronously.
+
+A model failure, rejected result, denied permission, stopped server, or two
+hung requests leaves deterministic naming active. Only one nonempty output line
+within `max_chars` is accepted. Late, stale, cross-tab, and closed-tab results
+are ignored. A manual rename always wins, including while a request is in
+flight. Native manual protection lasts for that tab's lifetime; open a new tab
+to resume automatic naming for that work.
+
+### Build and install without native Ollama
 
 ```sh
 rustup target add wasm32-wasip1
-cargo test --lib
-cargo build --release --target wasm32-wasip1 --bin zellij-tab-namer
+cargo test --locked --lib
+cargo build --locked --release --target wasm32-wasip1 \
+  --bin zellij-tab-namer
+
+zellij-tab-namer install --mode wasm \
+  --wasm-source ./target/wasm32-wasip1/release/zellij-tab-namer.wasm \
+  --no-llm
 ```
+
+Without complete native LLM configuration, the plugin requests only
+`ReadApplicationState` and `ChangeApplicationState`, makes no web request, and
+uses deterministic naming.
+
+### Enable local Ollama refinement
+
+Install Ollama, start its local server, and fetch the configured model:
+
+```sh
+ollama serve
+ollama pull llama3.2
+```
+
+In another terminal, install the native artifact with a complete loopback
+configuration:
 
 ```sh
 zellij-tab-namer install --mode wasm \
   --wasm-source ./target/wasm32-wasip1/release/zellij-tab-namer.wasm \
-  --wasm-permission ReadApplicationState \
-  --wasm-permission ChangeApplicationState
+  --llm-base-url "http://localhost:11434/v1" \
+  --llm-model "llama3.2"
+```
+
+The native endpoint is fixed to OpenAI-compatible `/v1/chat/completions`.
+Installer validation accepts only unauthenticated `http` URLs using
+`localhost`, `127.0.0.1`, or `[::1]`, with no query or fragment. Native mode
+does not accept or require an API key. Supplying only one LLM option is an
+error. Omitting both options preserves existing managed LLM nodes during an
+artifact upgrade; explicit `--no-llm` removes them.
+
+The only variable metadata in a native request is the selected pane title or
+already-derived fallback label, the configured model name, and the maximum
+label length. The JSON body also contains fixed prompt text and bounded
+generation parameters. It does not contain pane contents, scrollback, raw
+working directories, full commands, environment data, manual tab names, tab
+IDs, or local paths. Working directory and command metadata may be used locally
+to derive a fallback, but the raw values are not transmitted.
+
+Zellij 0.44 follows HTTP redirects before returning a response to the plugin.
+Consequently, a loopback Ollama-compatible server can redirect the disclosed
+title/fallback metadata to another host; only run a server you trust. The
+plugin rejects response bodies above 64 KiB when it receives them, but that
+limit does not prevent Zellij's host from buffering a larger redirected
+response first.
+
+### Permissions and fresh-server restart
+
+WASM setup installs the artifact, maintains one `zellij-tab-namer` alias and
+`load_plugins` entry, and pre-grants the plugin's baseline permissions. A
+complete native Ollama configuration also pre-grants `WebAccess`. Permissions
+are keyed by the normalized absolute WASM path, without the `file:` prefix used
+in `config.kdl`:
+
+- macOS: `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl`
+- Linux/XDG: `$XDG_CACHE_HOME/zellij/permissions.kdl` or
+  `~/.cache/zellij/permissions.kdl`
+
+Headless plugins have no focusable permission prompt. On macOS the installer
+therefore safely unfreezes an existing permissions file when necessary, writes
+and verifies the grants transactionally, and freezes it with the `uchg` flag by
+default so a running Zellij server cannot overwrite the pre-grant on exit.
+Backups and a rollback manifest are created for mutations. Use
+`--no-freeze-permissions` only if you intentionally manage that lifecycle
+yourself.
+
+Zellij caches plugin configuration and grants in the server process. After an
+install or configuration/permission change, exit Zellij and run this from a
+terminal outside Zellij before starting a new session:
+
+```sh
+zellij delete-all-sessions --force
+```
+
+`--no-llm` prevents new automatic `WebAccess` grants but does not remove an
+existing grant from the shared permission cache: the installer cannot know
+whether another configuration still relies on it. To revoke it manually on
+macOS, first stop all Zellij sessions, then:
+
+```sh
+permissions_file="$HOME/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
+chflags nouchg "$permissions_file"
+# Edit only this plugin's absolute-path entry and remove its WebAccess line.
+chflags uchg "$permissions_file"
+```
+
+Keep the installer's backup, preserve valid KDL, and restart with a fresh
+Zellij server afterward. On other platforms, edit the applicable cache path and
+preserve its existing ownership and mode. Do not remove `WebAccess` if another
+installation sharing that exact plugin-path entry still needs it.
+
+### Native diagnostics
+
+Native failures keep the deterministic label and emit only bounded category
+names: `IncompleteConfiguration`, `PermissionDenied`, `TransportFailure`,
+`HttpStatus`, `ValidationRejected`, or `SchedulerSaturated`. Diagnostics never
+include source text, request prompts, response bodies, or complete endpoint
+URLs, and each category is emitted at most once for a naming generation. Two
+hung host requests saturate the fixed scheduler until a response arrives or a
+fresh server is started; tab naming itself continues locally.
+
+## Installer safety and rollback
+
+Run a dry run before either installation mode:
+
+```sh
+zellij-tab-namer install --mode both --dry-run
 ```
 
 Remote artifact installs require HTTPS plus an expected digest:
@@ -101,19 +233,10 @@ zellij-tab-namer install --mode wasm \
   --wasm-sha256 "<64-character-sha256>"
 ```
 
-WASM setup installs the artifact to the Zellij plugins directory, adds a
-`zellij-tab-namer` plugin alias, adds it to `load_plugins`, and can pre-grant
-known permissions in `permissions.kdl`. File mutations create backups and write
-a rollback manifest. Local and remote artifacts are validated before config is
-mutated. The installer reports when a fresh Zellij session is needed; it does
-not delete sessions or restart Zellij for you.
-
-Permission grants are written to Zellij's platform cache path by default
-(`~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl` on macOS,
-`$XDG_CACHE_HOME/zellij/permissions.kdl` or `~/.cache/zellij/permissions.kdl`
-elsewhere). Zellij loads the plugin from a `file:/...` URL in `config.kdl`, but
-its permission cache keys the grant by the normalized absolute WASM path with
-no `file:` prefix.
+Local and remote artifacts are validated before configuration is mutated.
+Configuration and permission writes are backed up, verified, and rolled back
+on failure. The installer refuses unsafe symlink targets and reports whether a
+fresh session is required; it never deletes sessions for you.
 
 Rollback uses the latest manifest:
 
@@ -122,70 +245,17 @@ zellij-tab-namer rollback --dry-run
 zellij-tab-namer rollback
 ```
 
-## LLM Compression
-
-LLM use is optional. When no endpoint is configured, labels are shortened
-locally.
-
-The client uses OpenAI-compatible chat completions:
-
-```sh
-export ZELLIJ_TAB_NAMER_BASE_URL="http://localhost:11434/v1"
-export ZELLIJ_TAB_NAMER_MODEL="llama3.2"
-export ZELLIJ_TAB_NAMER_API_KEY="ollama"
-export ZELLIJ_TAB_NAMER_TIMEOUT="0.8"
-```
-
-For installer config, pass endpoint metadata without secrets:
-
-```sh
-zellij-tab-namer install --mode cli \
-  --llm-base-url "http://localhost:11434/v1" \
-  --llm-model "llama3.2"
-```
-
-The API key remains an environment variable; it is not written into installer
-config.
-
-Only the chosen pane title or pushed metadata text is sent to the endpoint,
-along with the maximum label size. The watcher does not send visible pane text
-or scrollback.
-
-## Manual Overrides
-
-The watcher stores the last generated name per tab. If the current tab name is
-non-default and differs from the stored generated value, it is treated as a
-manual override and skipped. Use `--force` for a deliberate one-off refresh.
-
-If the state file is lost, the watcher errs on the side of preserving clear
-non-default tab names rather than overwriting them.
-
-## Native Plugin
-
-The Rust plugin subscribes to Zellij pane and tab updates, debounces bursts of
-events, and renames tabs by stable ID. It uses the best eligible non-plugin pane
-title, queries Zellij for that pane's working directory and running command for
-the deterministic `project - activity` fallback, and never reads pane contents
-or scrollback. Existing non-default names are preserved as manual overrides;
-clearing a tab name
-re-enables automatic naming for that tab.
-
-The plugin requests `ReadApplicationState` and `ChangeApplicationState` and is
-designed to run headlessly through `load_plugins`. A fresh Zellij server is
-required after pre-granting those permissions. Native LLM compression is not
-yet included; long labels are shortened locally without network access.
-
 ## Releases
 
-GitHub Actions builds and checks the native plugin for pull requests, pushes to
-`main`, and manual workflow runs. Each successful run publishes a workflow
-artifact named `zellij-tab-namer-wasm` containing:
+GitHub Actions checks, tests, builds, packages, and checksums the native plugin
+for pull requests, pushes to `main`, and manual workflow runs. Each successful
+build uploads a workflow artifact named `zellij-tab-namer-wasm` containing:
 
 - `zellij-tab-namer.wasm`
 - `zellij-tab-namer.wasm.sha256`
 
-To publish those files on a GitHub Release, update the package version in
-`Cargo.toml`, create the matching `v<version>` tag, and push it. For example,
-version `0.1.0` is released from tag `v0.1.0`. Published release assets are
-immutable: rebuilding an existing release tag does not replace them. Publish a
-new version and tag when the artifact changes.
+Publishing is separate from preparing v0.2.0. The workflow publishes a GitHub
+Release only for a pushed `v<version>` tag matching the Cargo package version,
+and it refuses to replace an existing release's immutable assets. This work
+does not create or push `v0.2.0`; release publication requires an explicit
+follow-up action.

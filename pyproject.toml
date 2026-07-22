@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zellij-tab-namer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Name Zellij tabs from pane titles and lightweight local context."
 readme = "README.md"
 requires-python = ">=3.9"

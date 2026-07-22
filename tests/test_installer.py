@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -797,6 +798,66 @@ load_plugins {{
 
             self.assertEqual(applied.status, "complete")
             self.assertFalse(immutable_state["permissions"])
+            self.assertEqual(
+                paths.permissions_file.read_text(encoding="utf-8"),
+                original_permissions,
+            )
+
+    def test_rollback_reports_chflags_restore_failure_as_blocked(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.permissions_file.parent.mkdir(parents=True)
+            paths.backup_dir.mkdir(parents=True)
+            paths.manifest_file.parent.mkdir(parents=True, exist_ok=True)
+            original_permissions = '"/tmp/other.wasm" {\n    ReadApplicationState\n}\n'
+            current_permissions = (
+                original_permissions
+                + '"/tmp/plugins/zellij-tab-namer.wasm" {\n'
+                + "    ChangeApplicationState\n"
+                + "}\n"
+            )
+            paths.permissions_file.write_text(current_permissions, encoding="utf-8")
+            backup_path = paths.backup_dir / "permissions.kdl.bak"
+            backup_path.write_text(original_permissions, encoding="utf-8")
+            permissions_path = paths.permissions_file.resolve(strict=False)
+            manifest_data = {
+                "version": 1,
+                "installed_at": "2026-07-22T00:00:00+00:00",
+                "mode": "wasm",
+                "backups": [
+                    {
+                        "target": str(permissions_path),
+                        "backup": str(backup_path.resolve(strict=False)),
+                        "existed": True,
+                        "checksum": installer_module._sha256_file(paths.permissions_file),
+                        "immutable": True,
+                    }
+                ],
+                "fresh_session_required": True,
+                "verification_command": [],
+            }
+            paths.manifest_file.write_text(
+                json.dumps(manifest_data, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                installer_module,
+                "_is_user_immutable",
+                return_value=False,
+            ), patch.object(
+                installer_module,
+                "_set_immutable",
+                side_effect=subprocess.CalledProcessError(
+                    1,
+                    ["chflags", "uchg", str(permissions_path)],
+                ),
+            ):
+                result = rollback(paths=paths)
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIn("failed to roll back", "\n".join(result.messages))
+            self.assertIn("returned non-zero exit status 1", "\n".join(result.messages))
             self.assertEqual(
                 paths.permissions_file.read_text(encoding="utf-8"),
                 original_permissions,

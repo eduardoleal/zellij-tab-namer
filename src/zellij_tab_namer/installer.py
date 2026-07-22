@@ -931,7 +931,7 @@ def _rollback_record(
             result.operations.append(
                 Operation("rollback", str(target), "complete", "removed created file")
             )
-    except OSError as exc:
+    except (OSError, subprocess.CalledProcessError) as exc:
         result.status = "blocked"
         result.messages.append(f"failed to roll back {target}: {exc}")
 

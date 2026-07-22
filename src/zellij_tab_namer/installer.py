@@ -12,6 +12,7 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -77,12 +78,10 @@ class InstallPaths:
     ) -> "InstallPaths":
         resolved_home = _normalize_path(home or Path.home())
         config_root = _normalize_path(
-            xdg_config_home
-            or Path(os.environ.get("XDG_CONFIG_HOME", resolved_home / ".config"))
+            xdg_config_home or _env_path("XDG_CONFIG_HOME", resolved_home / ".config")
         )
         state_root = _normalize_path(
-            xdg_state_home
-            or Path(os.environ.get("XDG_STATE_HOME", resolved_home / ".local/state"))
+            xdg_state_home or _env_path("XDG_STATE_HOME", resolved_home / ".local/state")
         )
         zellij_config_dir = _default_zellij_config_dir(resolved_home, config_root)
         zellij_config_file = _default_zellij_config_file(zellij_config_dir)
@@ -1126,12 +1125,17 @@ def _plugin_url(path: Path) -> str:
     return f"file:{_normalize_path(path)}"
 
 
+def _env_path(name: str, default: Path) -> Path:
+    value = os.environ.get(name)
+    return Path(value) if value else default
+
+
 def _default_permissions_file(home: Path) -> Path:
     if platform.system() == "Darwin":
         return _normalize_file_target_path(
             home / "Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
         )
-    cache_root = Path(os.environ.get("XDG_CACHE_HOME", home / ".cache"))
+    cache_root = _env_path("XDG_CACHE_HOME", home / ".cache")
     return _normalize_file_target_path(cache_root / "zellij" / "permissions.kdl")
 
 
@@ -1411,7 +1415,7 @@ def _is_user_immutable(path: Path) -> bool:
     if platform.system() != "Darwin" or not path.exists():
         return False
     flags = getattr(path.stat(), "st_flags", 0)
-    return bool(flags & getattr(os, "UF_IMMUTABLE", 0))
+    return bool(flags & getattr(stat, "UF_IMMUTABLE", 0))
 
 
 def _clear_immutable(path: Path) -> None:

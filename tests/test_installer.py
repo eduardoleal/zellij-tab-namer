@@ -70,6 +70,38 @@ class InstallerTests(unittest.TestCase):
                 xdg_cache.resolve(strict=False) / "zellij" / "permissions.kdl",
             )
 
+    def test_defaults_treat_empty_xdg_env_values_as_unset(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            resolved_root = root.resolve(strict=False)
+            with patch("platform.system", return_value="Linux"), patch.dict(
+                os.environ,
+                {
+                    "XDG_CONFIG_HOME": "",
+                    "XDG_STATE_HOME": "",
+                    "XDG_CACHE_HOME": "",
+                },
+                clear=True,
+            ):
+                paths = InstallPaths.defaults(home=root)
+
+            self.assertEqual(
+                paths.zellij_config_dir,
+                resolved_root / ".config" / "zellij",
+            )
+            self.assertEqual(
+                paths.tab_namer_config_dir,
+                resolved_root / ".config" / "zellij-tab-namer",
+            )
+            self.assertEqual(
+                paths.state_file,
+                resolved_root / ".local" / "state" / "zellij-tab-namer" / "state.json",
+            )
+            self.assertEqual(
+                paths.permissions_file,
+                resolved_root / ".cache" / "zellij" / "permissions.kdl",
+            )
+
     def test_defaults_respect_zellij_config_dir_env(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -728,6 +760,24 @@ load_plugins {{
             )
             self.assertFalse(paths.permissions_file.exists())
             self.assertFalse(paths.manifest_file.exists())
+
+    def test_is_user_immutable_uses_stat_module_flag(self):
+        class FakeStat:
+            st_flags = 0x2
+
+        with patch("platform.system", return_value="Darwin"), patch.object(
+            Path,
+            "stat",
+            return_value=FakeStat(),
+        ), patch.object(
+            installer_module.stat,
+            "UF_IMMUTABLE",
+            0x2,
+            create=True,
+        ):
+            self.assertTrue(
+                installer_module._is_user_immutable(Path("/tmp/permissions.kdl"))
+            )
 
     def test_rollback_restores_preinstall_mutable_permissions_flag(self):
         with tempfile.TemporaryDirectory() as tempdir:

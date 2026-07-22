@@ -1,8 +1,11 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import zellij_tab_namer.installer as installer_module
 from zellij_tab_namer.installer import (
     InstallError,
     InstallOptions,
@@ -35,6 +38,36 @@ def make_paths(root):
 
 
 class InstallerTests(unittest.TestCase):
+    def test_default_permissions_path_is_platform_specific(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            resolved_root = root.resolve(strict=False)
+            with patch("platform.system", return_value="Darwin"):
+                mac_paths = InstallPaths.defaults(home=root)
+            self.assertEqual(
+                mac_paths.permissions_file,
+                resolved_root
+                / "Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl",
+            )
+
+            with patch("platform.system", return_value="Linux"):
+                linux_paths = InstallPaths.defaults(home=root)
+            self.assertEqual(
+                linux_paths.permissions_file,
+                resolved_root / ".cache" / "zellij" / "permissions.kdl",
+            )
+
+            xdg_cache = root / "xdg-cache"
+            with patch("platform.system", return_value="Linux"), patch.dict(
+                os.environ,
+                {"XDG_CACHE_HOME": str(xdg_cache)},
+            ):
+                xdg_paths = InstallPaths.defaults(home=root)
+            self.assertEqual(
+                xdg_paths.permissions_file,
+                xdg_cache.resolve(strict=False) / "zellij" / "permissions.kdl",
+            )
+
     def test_cli_dry_run_plans_config_without_writing(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)
@@ -153,7 +186,7 @@ load_plugins {
         self.assertTrue(changed)
         self.assertFalse(changed_again)
         normalized_path = Path("/tmp/plugins/zellij-tab-namer.wasm").resolve(strict=False)
-        self.assertEqual(updated_again.count(f'"{normalized_path}"'), 1)
+        self.assertEqual(updated_again.count(f'"file:{normalized_path}"'), 1)
         self.assertIn("ChangeApplicationState", updated_again)
 
     def test_wasm_apply_installs_artifact_config_and_permissions(self):
@@ -188,7 +221,10 @@ load_plugins {
             permissions = paths.permissions_file.read_text(encoding="utf-8")
             self.assertIn("zellij-tab-namer location=", config)
             self.assertIn("\n    zellij-tab-namer\n", config)
-            self.assertIn(str(paths.plugins_dir / "zellij-tab-namer.wasm"), permissions)
+            self.assertIn(
+                f"file:{(paths.plugins_dir / 'zellij-tab-namer.wasm').resolve(strict=False)}",
+                permissions,
+            )
             self.assertIn("ChangeApplicationState", permissions)
             self.assertTrue(result.fresh_session_required)
 
@@ -349,8 +385,45 @@ load_plugins {
         )
 
         self.assertTrue(changed)
-        normalized_path = str(Path('/tmp/plugins/zellij"tab.wasm').resolve(strict=False))
+        quoted_path = Path('/tmp/plugins/zellij"tab.wasm').resolve(strict=False)
+        normalized_path = f"file:{quoted_path}"
         self.assertIn(json.dumps(normalized_path), updated)
+
+    def test_wasm_apply_rolls_back_artifact_when_later_write_fails(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            config_path = paths.zellij_config_dir / "config.kdl"
+            config_path.write_text(
+                "plugins {\n}\n\nload_plugins {\n}\n",
+                encoding="utf-8",
+            )
+            source = write_wasm(Path(tempdir) / "source.wasm")
+            original_write = installer_module._write_text_atomic
+
+            def fail_config_write(path, content):
+                if Path(path) == config_path.resolve(strict=False):
+                    raise OSError("simulated config write failure")
+                return original_write(path, content)
+
+            with patch.object(
+                installer_module,
+                "_write_text_atomic",
+                side_effect=fail_config_write,
+            ):
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        freeze_permissions=False,
+                        paths=paths,
+                    )
+                )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIn("rolled back partial changes", "\n".join(result.messages))
+            self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+            self.assertFalse(paths.manifest_file.exists())
 
     def test_wasm_rejects_invalid_artifact(self):
         with tempfile.TemporaryDirectory() as tempdir:

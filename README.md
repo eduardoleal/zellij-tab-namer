@@ -107,6 +107,12 @@ a rollback manifest. Local and remote artifacts are validated before config is
 mutated. The installer reports when a fresh Zellij session is needed; it does
 not delete sessions or restart Zellij for you.
 
+Permission grants are written to Zellij's platform cache path by default
+(`~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl` on macOS,
+`$XDG_CACHE_HOME/zellij/permissions.kdl` or `~/.cache/zellij/permissions.kdl`
+elsewhere) and keyed by the same `file:/.../zellij-tab-namer.wasm` plugin URL
+that `config.kdl` loads.
+
 Rollback uses the latest manifest:
 
 ```sh

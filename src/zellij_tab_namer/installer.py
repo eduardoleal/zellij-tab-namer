@@ -81,10 +81,7 @@ class InstallPaths:
             plugins_dir=zellij_config_dir / "plugins",
             tab_namer_config_dir=tab_namer_config_dir,
             state_file=state_root / "zellij-tab-namer" / "state.json",
-            permissions_file=(
-                resolved_home
-                / "Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
-            ),
+            permissions_file=_default_permissions_file(resolved_home),
             backup_dir=tab_namer_config_dir / "backups",
             manifest_file=tab_namer_config_dir / MANIFEST_FILENAME,
         )
@@ -173,7 +170,14 @@ def install(options: InstallOptions) -> InstallResult:
     _resolve_overall_status(options, result)
 
     if not options.dry_run and _should_write_manifest(result):
-        _write_manifest(options, result)
+        try:
+            _write_manifest(options, result)
+        except Exception as exc:
+            _rollback_applied_records(result.backups, options.paths, result)
+            _block_install(
+                result,
+                f"failed to write installer manifest; rolled back applied changes: {exc}",
+            )
 
     return result
 
@@ -299,9 +303,9 @@ def wire_zellij_config(config_text: str, wasm_path: Path, max_chars: int) -> Tup
             "config.kdl must already contain plugins and load_plugins blocks"
         )
 
-    wasm_path = _normalize_path(wasm_path)
+    plugin_url = _plugin_url(wasm_path)
     alias_entry = (
-        f"    {PLUGIN_ALIAS} location={_kdl_string(f'file:{wasm_path}')} {{\n"
+        f"    {PLUGIN_ALIAS} location={_kdl_string(plugin_url)} {{\n"
         f"        max_chars {max_chars}\n"
         "    }\n"
     )
@@ -315,7 +319,7 @@ def wire_zellij_config(config_text: str, wasm_path: Path, max_chars: int) -> Tup
     else:
         alias_text = next_text[alias_block[0] : alias_block[1]]
         if (
-            _kdl_string(f"file:{wasm_path}") not in alias_text
+            _kdl_string(plugin_url) not in alias_text
             or f"max_chars {max_chars}" not in alias_text
         ):
             raise InstallError(
@@ -348,8 +352,7 @@ def update_permission_grants(
     if not _balanced_kdl(permissions_text):
         raise InstallError("permissions.kdl appears malformed; refusing to edit it")
 
-    wasm_path = _normalize_path(wasm_path)
-    key = _kdl_string(str(wasm_path))
+    key = _kdl_string(_plugin_url(wasm_path))
     block = _find_exact_quoted_block(permissions_text, key)
     if block is None:
         grant_lines = "".join(f"    {permission}\n" for permission in normalized_grants)
@@ -434,6 +437,7 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
         return
 
     downloaded: Optional[Path] = None
+    applied_records: List[BackupRecord] = []
     try:
         wasm_source = _describe_wasm_source(options)
         changes = _plan_wasm_changes(options, target)
@@ -474,6 +478,7 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
         )
         if artifact_record:
             result.backups.append(artifact_record)
+            applied_records.append(artifact_record)
 
         config_record = _write_text_with_backup(
             changes.config_path,
@@ -482,6 +487,7 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
         )
         if config_record:
             result.backups.append(config_record)
+            applied_records.append(config_record)
 
         if changes.next_permissions is not None:
             permissions_record = _write_permissions_change(
@@ -492,6 +498,7 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
             )
             if permissions_record:
                 result.backups.append(permissions_record)
+                applied_records.append(permissions_record)
 
         result.runtime_status[MODE_WASM] = "complete"
         result.operations.extend(
@@ -512,6 +519,13 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
         result.fresh_session_required = True
     except InstallError as exc:
         _block_runtime(result, MODE_WASM, str(exc))
+    except Exception as exc:
+        _rollback_applied_records(applied_records, options.paths, result)
+        _block_runtime(
+            result,
+            MODE_WASM,
+            f"failed to apply WASM install; rolled back partial changes: {exc}",
+        )
     finally:
         if downloaded:
             _unlink_missing_ok(downloaded)
@@ -853,6 +867,24 @@ def _rollback_record(
         result.messages.append(f"failed to roll back {target}: {exc}")
 
 
+def _rollback_applied_records(
+    records: Sequence[BackupRecord],
+    paths: InstallPaths,
+    result: InstallResult,
+) -> None:
+    for record in reversed(records):
+        rollback_result = InstallResult(
+            status="complete",
+            mode="rollback-partial",
+            dry_run=False,
+        )
+        _rollback_record(asdict(record), paths, rollback_result, dry_run=False)
+        result.operations.extend(rollback_result.operations)
+        if rollback_result.status == "blocked":
+            result.messages.extend(rollback_result.messages)
+            break
+
+
 def _restore_backup(backup_path: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
@@ -948,6 +980,14 @@ def _block_runtime(result: InstallResult, runtime: str, message: str) -> None:
     )
 
 
+def _block_install(result: InstallResult, message: str) -> None:
+    result.status = "blocked"
+    result.messages.append(message)
+    result.operations.append(
+        Operation("apply installer", result.mode, "blocked", message)
+    )
+
+
 def _mode_includes(mode: str, runtime: str) -> bool:
     return mode == runtime or mode == MODE_BOTH
 
@@ -986,6 +1026,17 @@ def _normalize_paths(paths: InstallPaths) -> InstallPaths:
 
 def _normalize_path(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
+
+
+def _plugin_url(path: Path) -> str:
+    return f"file:{_normalize_path(path)}"
+
+
+def _default_permissions_file(home: Path) -> Path:
+    if platform.system() == "Darwin":
+        return home / "Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
+    cache_root = Path(os.environ.get("XDG_CACHE_HOME", home / ".cache"))
+    return _normalize_path(cache_root / "zellij" / "permissions.kdl")
 
 
 def _format_number(value: float) -> str:

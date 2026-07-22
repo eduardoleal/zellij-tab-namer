@@ -141,9 +141,12 @@ class Operation:
 @dataclass(frozen=True)
 class WasmChanges:
     config_path: Path
+    original_config: str
     next_config: str
     config_changed: bool
     permissions_path: Path
+    original_permissions: Optional[str] = None
+    permissions_originally_immutable: bool = False
     next_permissions: Optional[str] = None
     permissions_changed: bool = False
 
@@ -192,10 +195,17 @@ def install(options: InstallOptions) -> InstallResult:
         try:
             _write_manifest(options, result)
         except Exception as exc:
-            _rollback_applied_records(result.backups, options.paths, result)
+            fully_rolled_back = _rollback_applied_records(
+                result.backups, options.paths, result
+            )
+            rollback_detail = (
+                "rolled back applied changes"
+                if fully_rolled_back
+                else "rolled back non-conflicting changes; preserved divergent targets"
+            )
             _block_install(
                 result,
-                f"failed to write installer manifest; rolled back applied changes: {exc}",
+                f"failed to write installer manifest; {rollback_detail}: {exc}",
             )
 
     return result
@@ -352,7 +362,7 @@ def normalize_llm_base_url(base_url: str) -> str:
     path = parsed.path.rstrip("/")
     if path not in ("", "/v1"):
         raise InstallError("native LLM base URL path must be empty or /v1")
-    completion_path = f"{path}/chat/completions" if path else "/chat/completions"
+    completion_path = f"{path}/chat/completions" if path else "/v1/chat/completions"
     return f"http://{authority}{completion_path}"
 
 
@@ -585,6 +595,11 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
         if artifact_record:
             result.backups.append(artifact_record)
 
+        _assert_planned_text_unchanged(
+            changes.config_path,
+            changes.original_config,
+            "config.kdl",
+        )
         config_record = _write_text_with_backup(
             changes.config_path,
             changes.next_config,
@@ -594,6 +609,18 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
             result.backups.append(config_record)
 
         if changes.next_permissions is not None:
+            _assert_planned_text_unchanged(
+                changes.permissions_path,
+                changes.original_permissions,
+                "permissions.kdl",
+            )
+            if (
+                _is_user_immutable(changes.permissions_path)
+                != changes.permissions_originally_immutable
+            ):
+                raise InstallError(
+                    "permissions.kdl immutable state changed while the WASM install was planned"
+                )
             permissions_record, originally_immutable = _write_permissions_change(
                 changes.permissions_path,
                 changes.next_permissions,
@@ -674,8 +701,10 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
     _refuse_symlink_target(permissions_path)
     try:
         permissions_text = permissions_path.read_text(encoding="utf-8")
+        original_permissions = permissions_text
     except FileNotFoundError:
         permissions_text = ""
+        original_permissions = None
     except OSError as exc:
         raise InstallError(f"failed to read permissions.kdl: {exc}") from exc
     effective_grants = ["ReadApplicationState", "ChangeApplicationState"]
@@ -689,9 +718,12 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
     )
     return WasmChanges(
         config_path=config_path,
+        original_config=config_text,
         next_config=next_config,
         config_changed=config_changed,
         permissions_path=options.paths.permissions_file,
+        original_permissions=original_permissions,
+        permissions_originally_immutable=_is_user_immutable(permissions_path),
         next_permissions=next_permissions,
         permissions_changed=permissions_changed,
     )
@@ -852,6 +884,22 @@ def _write_text_with_backup(
         existed=bool(record),
         checksum=_sha256_file(path),
     )
+
+
+def _assert_planned_text_unchanged(
+    path: Path,
+    expected: Optional[str],
+    label: str,
+) -> None:
+    _refuse_symlink_target(path)
+    try:
+        current = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = None
+    except OSError as exc:
+        raise InstallError(f"failed to re-read {label}: {exc}") from exc
+    if current != expected:
+        raise InstallError(f"{label} changed while the WASM install was planned")
 
 
 def _write_permissions_change(
@@ -1075,8 +1123,18 @@ def _rollback_applied_records(
     records: Sequence[BackupRecord],
     paths: InstallPaths,
     result: InstallResult,
-) -> None:
+) -> bool:
+    fully_rolled_back = True
     for record in reversed(records):
+        target = _normalize_file_target_path(Path(record.target))
+        if record.checksum and (
+            not target.exists() or _sha256_file(target) != record.checksum
+        ):
+            result.messages.append(
+                f"automatic rollback preserved concurrently changed target: {target}"
+            )
+            fully_rolled_back = False
+            continue
         rollback_result = InstallResult(
             status="complete",
             mode="rollback-partial",
@@ -1086,14 +1144,21 @@ def _rollback_applied_records(
         result.operations.extend(rollback_result.operations)
         if rollback_result.status == "blocked":
             result.messages.extend(rollback_result.messages)
-            break
+            fully_rolled_back = False
+    return fully_rolled_back
 
 
 def _rollback_blocked_install(options: InstallOptions, result: InstallResult) -> None:
     if options.dry_run or not result.backups:
         return
-    _rollback_applied_records(result.backups, options.paths, result)
-    result.messages.append("blocked install rolled back applied changes")
+    fully_rolled_back = _rollback_applied_records(
+        result.backups, options.paths, result
+    )
+    result.messages.append(
+        "blocked install rolled back applied changes"
+        if fully_rolled_back
+        else "blocked install rolled back non-conflicting changes and preserved divergent targets"
+    )
 
 
 def _restore_backup(backup_path: Path, target: Path) -> None:

@@ -1,4 +1,5 @@
 [
+  {"input":"http://localhost:11434","valid":true,"normalized":"http://localhost:11434/v1/chat/completions"},
   {"input":"http://localhost:11434/v1","valid":true,"normalized":"http://localhost:11434/v1/chat/completions"},
   {"input":"http://localhost:11434/v1/","valid":true,"normalized":"http://localhost:11434/v1/chat/completions"},
   {"input":"http://127.0.0.1:11434/v1","valid":true,"normalized":"http://127.0.0.1:11434/v1/chat/completions"},

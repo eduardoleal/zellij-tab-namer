@@ -72,6 +72,7 @@ struct RequestRecord {
     tab_id: usize,
     generation: u64,
     source: String,
+    max_chars: usize,
 }
 
 #[derive(Default)]
@@ -157,19 +158,18 @@ impl RefinementCoordinator {
         }
     }
 
-    pub fn finish(&mut self, request_id: u64, status: u16, body: &[u8]) -> RefinementCompletion {
+    pub fn finish(
+        &mut self,
+        request_id: u64,
+        status: u16,
+        body: &[u8],
+        live_tab_names: &BTreeMap<usize, String>,
+    ) -> RefinementCompletion {
         let Some(request) = self.requests.remove(&request_id) else {
             return RefinementCompletion::default();
         };
 
-        let response = validate_chat_response(
-            status,
-            body,
-            self.tabs
-                .get(&request.tab_id)
-                .map_or(0, |tab| tab.max_chars),
-        );
-        let response_error = response.as_ref().err().cloned();
+        let mut response_error = None;
         let mut rename = None;
         if let Some(tab) = self.tabs.get_mut(&request.tab_id) {
             if tab.in_flight == Some(request_id) {
@@ -178,11 +178,18 @@ impl RefinementCoordinator {
             if tab.generation == request.generation && tab.source == request.source {
                 tab.terminal = true;
                 tab.queued = None;
-                if tab.enabled && !tab.manual && tab.observed_name == tab.generated {
-                    if let Ok(label) = &response {
-                        if label.as_str() != tab.generated {
-                            tab.generated.clone_from(label);
-                            rename = Some((request.tab_id, label.clone()));
+                if let Some(live_name) = live_tab_names.get(&request.tab_id) {
+                    tab.observed_name.clone_from(live_name);
+                    if is_manual_name(live_name, Some(&tab.generated), &tab.generated) {
+                        tab.manual = true;
+                    } else if tab.enabled && !tab.manual && live_name == &tab.generated {
+                        match validate_chat_response(status, body, request.max_chars) {
+                            Ok(label) if label != tab.generated => {
+                                tab.generated.clone_from(&label);
+                                rename = Some((request.tab_id, label));
+                            }
+                            Ok(_) => {}
+                            Err(error) => response_error = Some(error),
                         }
                     }
                 }
@@ -289,6 +296,7 @@ impl RefinementCoordinator {
                     tab_id,
                     generation: queued.generation,
                     source: queued.source.clone(),
+                    max_chars: queued.max_chars,
                 },
             );
             dispatched.push(ScheduledRefinement {
@@ -583,6 +591,10 @@ mod tests {
         .unwrap()
     }
 
+    fn live_name(tab_id: usize, name: &str) -> BTreeMap<usize, String> {
+        BTreeMap::from([(tab_id, name.to_owned())])
+    }
+
     #[test]
     fn valid_response_requires_observed_fallback_and_never_churns() {
         let mut coordinator = RefinementCoordinator::default();
@@ -604,7 +616,12 @@ mod tests {
             true,
         );
         let request_id = observed.requests[0].request_id;
-        let completion = coordinator.finish(request_id, 200, &response("native Ollama"));
+        let completion = coordinator.finish(
+            request_id,
+            200,
+            &response("native Ollama"),
+            &live_name(7, "implement native..."),
+        );
         assert_eq!(completion.rename, Some((7, "native Ollama".into())));
 
         let stable = coordinator.reconcile(
@@ -662,20 +679,13 @@ mod tests {
             18,
             true,
         );
-        coordinator.reconcile(
-            9,
-            "prod deploy",
-            "protect manual production deployment label",
-            "protect manual...",
-            18,
-            true,
-        );
         assert_eq!(
             coordinator
                 .finish(
                     decision.requests[0].request_id,
                     200,
-                    &response("manual safety")
+                    &response("manual safety"),
+                    &live_name(9, "prod deploy"),
                 )
                 .rename,
             None
@@ -719,7 +729,12 @@ mod tests {
             16,
             true,
         );
-        let stale = coordinator.finish(first.requests[0].request_id, 200, &response("wrong tab"));
+        let stale = coordinator.finish(
+            first.requests[0].request_id,
+            200,
+            &response("wrong tab"),
+            &live_name(11, "second source..."),
+        );
         assert_eq!(stale.rename, None);
         assert!(stale.requests.is_empty());
         let current = coordinator.reconcile(
@@ -734,13 +749,18 @@ mod tests {
         coordinator.retain_tabs(&[]);
         assert_eq!(
             coordinator
-                .finish(current_request, 200, &response("closed tab"))
+                .finish(
+                    current_request,
+                    200,
+                    &response("closed tab"),
+                    &BTreeMap::new()
+                )
                 .rename,
             None
         );
         assert_eq!(
             coordinator
-                .finish(999_999, 200, &response("unknown"))
+                .finish(999_999, 200, &response("unknown"), &BTreeMap::new())
                 .rename,
             None
         );
@@ -785,7 +805,8 @@ mod tests {
         }
         assert_eq!(coordinator.in_flight_count(), 1);
         assert_eq!(coordinator.queued_count(), 1);
-        let completion = coordinator.finish(request_id, 503, b"");
+        let completion =
+            coordinator.finish(request_id, 503, b"", &live_name(21, "latest changing..."));
         assert_eq!(completion.requests.len(), 1);
         assert!(completion.requests[0].source.ends_with("1999"));
     }

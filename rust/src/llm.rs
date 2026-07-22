@@ -96,7 +96,7 @@ pub fn chat_completions_url(base_url: &str) -> Result<String, RequestError> {
         return Err(RequestError::InvalidBaseUrl);
     }
     let path = if normalized_path.is_empty() {
-        "/chat/completions".to_owned()
+        "/v1/chat/completions".to_owned()
     } else {
         format!("{normalized_path}/chat/completions")
     };

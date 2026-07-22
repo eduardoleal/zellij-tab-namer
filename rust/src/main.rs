@@ -47,10 +47,15 @@ impl ZellijPlugin for TabNamer {
                 self.schedule_update();
             }
             Event::WebRequestResult(status, _, body, context) => {
+                let live_tab_names = self
+                    .tabs
+                    .iter()
+                    .map(|tab| (tab.tab_id, tab.name.clone()))
+                    .collect();
                 let actions = self
                     .adapter
                     .as_mut()
-                    .map(|adapter| adapter.web_result(status, &body, &context))
+                    .map(|adapter| adapter.web_result(status, &body, &context, &live_tab_names))
                     .unwrap_or_default();
                 self.execute(actions);
             }

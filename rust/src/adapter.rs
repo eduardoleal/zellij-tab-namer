@@ -204,6 +204,7 @@ impl Adapter {
         status: u16,
         body: &[u8],
         context: &BTreeMap<String, String>,
+        live_tab_names: &BTreeMap<usize, String>,
     ) -> Vec<Action> {
         let Some(request_id) = context
             .get("request_id")
@@ -212,7 +213,9 @@ impl Adapter {
             return Vec::new();
         };
         let mut actions = Vec::new();
-        let completion = self.coordinator.finish(request_id, status, body);
+        let completion = self
+            .coordinator
+            .finish(request_id, status, body, live_tab_names);
         if let Some(error) = completion
             .response_error
             .as_ref()
@@ -256,7 +259,9 @@ impl Adapter {
                     actions.push(Action::Diagnostic {
                         category: DiagnosticCategory::ValidationRejected,
                     });
-                    let completion = self.coordinator.finish(request.request_id, 500, b"");
+                    let completion =
+                        self.coordinator
+                            .finish(request.request_id, 500, b"", &BTreeMap::new());
                     if let Some((tab_id, label)) = completion.rename {
                         actions.push(Action::Rename { tab_id, label });
                     }
@@ -345,15 +350,18 @@ mod tests {
     fn denied_permission_does_not_consume_generation() {
         let mut adapter = Adapter::new(configured());
         adapter.permission_result(false);
-        assert!(adapter
-            .reconcile(
-                4,
-                "Tab #5",
-                "a sufficiently long source title",
-                "long source..."
-            )
+        let denied = adapter.reconcile(
+            4,
+            "Tab #5",
+            "a sufficiently long source title",
+            "long source...",
+        );
+        assert!(denied
             .iter()
             .all(|action| !matches!(action, Action::WebRequest { .. })));
+        assert!(denied.contains(&Action::Diagnostic {
+            category: DiagnosticCategory::PermissionDenied,
+        }));
 
         adapter.permission_result(true);
         assert!(adapter
@@ -365,6 +373,32 @@ mod tests {
             )
             .iter()
             .any(|action| matches!(action, Action::WebRequest { .. })));
+    }
+
+    #[test]
+    fn incomplete_configuration_diagnostic_is_generation_bounded() {
+        let mut adapter = Adapter::new(BTreeMap::from([(
+            "llm_base_url".into(),
+            "http://localhost:11434/v1".into(),
+        )]));
+        let first = adapter.reconcile(
+            6,
+            "Tab #7",
+            "a sufficiently long source title",
+            "long source...",
+        );
+        assert!(first.contains(&Action::Diagnostic {
+            category: DiagnosticCategory::IncompleteConfiguration,
+        }));
+        let repeated = adapter.reconcile(
+            6,
+            "long source...",
+            "a sufficiently long source title",
+            "long source...",
+        );
+        assert!(repeated
+            .iter()
+            .all(|action| !matches!(action, Action::Diagnostic { .. })));
     }
 
     #[test]
@@ -425,14 +459,16 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let first = adapter.web_result(503, b"unavailable", &context);
+        let live_names = BTreeMap::from([(5, "debug async...".to_owned())]);
+        let first = adapter.web_result(503, b"unavailable", &context, &live_names);
         assert_eq!(
-            first
-                .iter()
-                .filter(|action| matches!(action, Action::Diagnostic { .. }))
-                .count(),
-            1
+            first,
+            vec![Action::Diagnostic {
+                category: DiagnosticCategory::HttpStatus,
+            }]
         );
-        assert!(adapter.web_result(503, b"unavailable", &context).is_empty());
+        assert!(adapter
+            .web_result(503, b"unavailable", &context, &live_names)
+            .is_empty());
     }
 }

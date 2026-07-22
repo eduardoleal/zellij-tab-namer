@@ -570,6 +570,45 @@ load_plugins {
             self.assertIn("unknown_setting true // preserve", config)
             self.assertIn("WebAccess", permissions)
 
+    def test_artifact_upgrade_preserves_native_llm_and_grants_web_access(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            target = (paths.plugins_dir / "zellij-tab-namer.wasm").resolve(strict=False)
+            original_config = """plugins {
+    zellij-tab-namer location=%s {
+        max_chars 32
+        llm_base_url "http://localhost:11434/v1"
+        llm_model "llama3.2"
+    }
+}
+
+load_plugins {
+    zellij-tab-namer
+}
+""" % json.dumps(f"file:{target}")
+            paths.zellij_config_file.write_text(original_config, encoding="utf-8")
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            result = install(
+                InstallOptions(
+                    mode="wasm",
+                    wasm_source=source,
+                    freeze_permissions=False,
+                    paths=paths,
+                )
+            )
+
+            self.assertEqual(result.status, "complete")
+            self.assertEqual(
+                paths.zellij_config_file.read_text(encoding="utf-8"),
+                original_config,
+            )
+            permissions = paths.permissions_file.read_text(encoding="utf-8")
+            self.assertIn("ReadApplicationState", permissions)
+            self.assertIn("ChangeApplicationState", permissions)
+            self.assertIn("WebAccess", permissions)
+
     def test_invalid_or_partial_llm_configuration_blocks_before_writes(self):
         for llm_base_url, llm_model in (
             ("http://localhost:11434/v1", None),
@@ -992,6 +1031,136 @@ load_plugins {
                 "\n".join(result.messages),
             )
             self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+            self.assertFalse(paths.manifest_file.exists())
+
+    def test_wasm_apply_refuses_stale_config_and_permission_plans(self):
+        for changed_target in ("config", "permissions"):
+            with self.subTest(target=changed_target), tempfile.TemporaryDirectory() as tempdir:
+                paths = make_paths(tempdir)
+                paths.zellij_config_dir.mkdir(parents=True)
+                original_config = "plugins {\n}\n\nload_plugins {\n}\n"
+                paths.zellij_config_file.write_text(original_config, encoding="utf-8")
+                paths.permissions_file.parent.mkdir(parents=True)
+                paths.permissions_file.write_text(
+                    '"/tmp/other.wasm" {\n    WebAccess\n}\n',
+                    encoding="utf-8",
+                )
+                source = write_wasm(Path(tempdir) / "source.wasm")
+                concurrent_text = f"// concurrent {changed_target} edit\n"
+
+                def resolve_after_concurrent_edit(options):
+                    target = (
+                        paths.zellij_config_file
+                        if changed_target == "config"
+                        else paths.permissions_file
+                    )
+                    target.write_text(concurrent_text, encoding="utf-8")
+                    return source, None
+
+                with patch.object(
+                    installer_module,
+                    "_resolve_wasm_source",
+                    side_effect=resolve_after_concurrent_edit,
+                ):
+                    result = install(
+                        InstallOptions(
+                            mode="wasm",
+                            wasm_source=source,
+                            freeze_permissions=False,
+                            paths=paths,
+                        )
+                    )
+
+                self.assertEqual(result.status, "blocked")
+                self.assertIn(
+                    f"{changed_target}.kdl changed while the WASM install was planned",
+                    "\n".join(result.messages),
+                )
+                changed_path = (
+                    paths.zellij_config_file
+                    if changed_target == "config"
+                    else paths.permissions_file
+                )
+                self.assertEqual(changed_path.read_text(encoding="utf-8"), concurrent_text)
+                if changed_target == "permissions":
+                    self.assertEqual(
+                        paths.zellij_config_file.read_text(encoding="utf-8"),
+                        original_config,
+                    )
+                self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+                self.assertFalse(paths.manifest_file.exists())
+
+    def test_automatic_rollback_preserves_postwrite_concurrent_edit(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            paths.zellij_config_file.write_text(
+                "plugins {\n}\n\nload_plugins {\n}\n",
+                encoding="utf-8",
+            )
+            source = write_wasm(Path(tempdir) / "source.wasm")
+            concurrent_config = "// user edit after installer write\n"
+
+            def fail_validation(*args, **kwargs):
+                paths.zellij_config_file.write_text(concurrent_config, encoding="utf-8")
+                raise InstallError("simulated final validation failure")
+
+            with patch.object(
+                installer_module,
+                "_validate_applied_wasm_changes",
+                side_effect=fail_validation,
+            ):
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        freeze_permissions=False,
+                        paths=paths,
+                    )
+                )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(
+                paths.zellij_config_file.read_text(encoding="utf-8"),
+                concurrent_config,
+            )
+            self.assertIn(
+                "automatic rollback preserved concurrently changed target",
+                "\n".join(result.messages),
+            )
+            self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+            self.assertFalse(paths.permissions_file.exists())
+            self.assertFalse(paths.manifest_file.exists())
+
+    def test_final_validation_failure_rolls_back_all_applied_files(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            original_config = "plugins {\n}\n\nload_plugins {\n}\n"
+            paths.zellij_config_file.write_text(original_config, encoding="utf-8")
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            with patch.object(
+                installer_module,
+                "_validate_applied_wasm_changes",
+                side_effect=InstallError("simulated final validation failure"),
+            ):
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        freeze_permissions=False,
+                        paths=paths,
+                    )
+                )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(
+                paths.zellij_config_file.read_text(encoding="utf-8"),
+                original_config,
+            )
+            self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+            self.assertFalse(paths.permissions_file.exists())
             self.assertFalse(paths.manifest_file.exists())
 
     def test_permission_freeze_failure_rolls_back_permission_write(self):

@@ -121,6 +121,30 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(result.runtime_status["cli"], "complete")
             self.assertEqual(result.runtime_status["wasm"], "unavailable")
 
+    def test_both_mode_rolls_back_cli_when_wasm_blocks(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            config_path = paths.tab_namer_config_dir / "config.json"
+
+            result = install(
+                InstallOptions(
+                    mode="both",
+                    wasm_source=Path(tempdir) / "missing.wasm",
+                    paths=paths,
+                )
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.runtime_status["cli"], "complete")
+            self.assertEqual(result.runtime_status["wasm"], "blocked")
+            self.assertIn("WASM source not found", "\n".join(result.messages))
+            self.assertIn(
+                "blocked install rolled back applied changes",
+                "\n".join(result.messages),
+            )
+            self.assertFalse(config_path.exists())
+            self.assertFalse(paths.manifest_file.exists())
+
     def test_wasm_only_without_artifact_blocks(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)
@@ -421,8 +445,50 @@ load_plugins {
                 )
 
             self.assertEqual(result.status, "blocked")
-            self.assertIn("rolled back partial changes", "\n".join(result.messages))
+            self.assertIn(
+                "blocked install rolled back applied changes",
+                "\n".join(result.messages),
+            )
             self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+            self.assertFalse(paths.manifest_file.exists())
+
+    def test_permission_freeze_failure_rolls_back_permission_write(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            config_path = paths.zellij_config_dir / "config.kdl"
+            config_path.write_text(
+                "plugins {\n}\n\nload_plugins {\n}\n",
+                encoding="utf-8",
+            )
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            with patch.object(
+                installer_module,
+                "_set_immutable",
+                side_effect=OSError("simulated chflags failure"),
+            ):
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        wasm_permissions=("ReadApplicationState",),
+                        paths=paths,
+                    )
+                )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIn("simulated chflags failure", "\n".join(result.messages))
+            self.assertIn(
+                "blocked install rolled back applied changes",
+                "\n".join(result.messages),
+            )
+            self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+            self.assertEqual(
+                config_path.read_text(encoding="utf-8"),
+                "plugins {\n}\n\nload_plugins {\n}\n",
+            )
+            self.assertFalse(paths.permissions_file.exists())
             self.assertFalse(paths.manifest_file.exists())
 
     def test_wasm_rejects_invalid_artifact(self):

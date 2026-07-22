@@ -168,6 +168,9 @@ def install(options: InstallOptions) -> InstallResult:
         _install_wasm(options, result)
 
     _resolve_overall_status(options, result)
+    if result.status == "blocked":
+        _rollback_blocked_install(options, result)
+        return result
 
     if not options.dry_run and _should_write_manifest(result):
         try:
@@ -437,7 +440,6 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
         return
 
     downloaded: Optional[Path] = None
-    applied_records: List[BackupRecord] = []
     try:
         wasm_source = _describe_wasm_source(options)
         changes = _plan_wasm_changes(options, target)
@@ -478,7 +480,6 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
         )
         if artifact_record:
             result.backups.append(artifact_record)
-            applied_records.append(artifact_record)
 
         config_record = _write_text_with_backup(
             changes.config_path,
@@ -487,18 +488,19 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
         )
         if config_record:
             result.backups.append(config_record)
-            applied_records.append(config_record)
 
         if changes.next_permissions is not None:
-            permissions_record = _write_permissions_change(
+            permissions_record, originally_immutable = _write_permissions_change(
                 changes.permissions_path,
                 changes.next_permissions,
                 options.paths.backup_dir,
-                options.freeze_permissions,
             )
             if permissions_record:
                 result.backups.append(permissions_record)
-                applied_records.append(permissions_record)
+            _freeze_permissions_file(
+                changes.permissions_path,
+                options.freeze_permissions or originally_immutable,
+            )
 
         result.runtime_status[MODE_WASM] = "complete"
         result.operations.extend(
@@ -520,11 +522,10 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
     except InstallError as exc:
         _block_runtime(result, MODE_WASM, str(exc))
     except Exception as exc:
-        _rollback_applied_records(applied_records, options.paths, result)
         _block_runtime(
             result,
             MODE_WASM,
-            f"failed to apply WASM install; rolled back partial changes: {exc}",
+            f"failed to apply WASM install: {exc}",
         )
     finally:
         if downloaded:
@@ -697,28 +698,36 @@ def _write_permissions_change(
     path: Path,
     content: str,
     backup_dir: Path,
-    freeze_permissions: bool,
-) -> Optional[BackupRecord]:
+) -> Tuple[Optional[BackupRecord], bool]:
     encoded = content.encode("utf-8")
+    originally_immutable = _is_user_immutable(path)
     if path.exists() and path.read_bytes() == encoded:
-        return None
+        return None, originally_immutable
     record = _backup_file(path, backup_dir) if path.exists() else None
 
-    originally_immutable = _is_user_immutable(path)
     if originally_immutable:
         _clear_immutable(path)
     try:
         _write_text_atomic(path, content)
-    finally:
-        if freeze_permissions and path.exists():
+    except Exception:
+        if originally_immutable and path.exists():
             _set_immutable(path)
+        raise
 
-    return BackupRecord(
-        target=str(path),
-        backup=record.backup if record else None,
-        existed=bool(record),
-        checksum=_sha256_file(path),
+    return (
+        BackupRecord(
+            target=str(path),
+            backup=record.backup if record else None,
+            existed=bool(record),
+            checksum=_sha256_file(path),
+        ),
+        originally_immutable,
     )
+
+
+def _freeze_permissions_file(path: Path, freeze: bool) -> None:
+    if freeze and path.exists() and not _is_user_immutable(path):
+        _set_immutable(path)
 
 
 def _copy_with_backup(
@@ -883,6 +892,13 @@ def _rollback_applied_records(
         if rollback_result.status == "blocked":
             result.messages.extend(rollback_result.messages)
             break
+
+
+def _rollback_blocked_install(options: InstallOptions, result: InstallResult) -> None:
+    if options.dry_run or not result.backups:
+        return
+    _rollback_applied_records(result.backups, options.paths, result)
+    result.messages.append("blocked install rolled back applied changes")
 
 
 def _restore_backup(backup_path: Path, target: Path) -> None:

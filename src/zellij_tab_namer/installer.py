@@ -844,24 +844,24 @@ def _rollback_preflight(records: Sequence[object], paths: InstallPaths) -> Optio
         if not isinstance(record, dict):
             return "rollback manifest contains an invalid backup entry"
         try:
-            target = _normalize_path(Path(str(record["target"])))
+            target = _normalize_file_target_path(Path(str(record["target"])))
         except KeyError:
             return "rollback manifest contains a backup entry without target"
-        if not _target_allowed(target, paths):
-            return f"rollback target is outside installer-managed paths: {target}"
         if target.exists() and target.is_symlink():
             return f"rollback target is a symlink; refusing to mutate it: {target}"
+        if not _target_allowed(target, paths):
+            return f"rollback target is outside installer-managed paths: {target}"
 
         existed = bool(record.get("existed"))
         backup = record.get("backup")
         if existed:
             if not backup:
                 return f"rollback entry for {target} is missing its backup"
-            backup_path = _normalize_path(Path(str(backup)))
-            if not _path_under(backup_path, paths.backup_dir):
-                return f"rollback backup is outside installer backup dir: {backup_path}"
+            backup_path = _normalize_file_target_path(Path(str(backup)))
             if not backup_path.exists() or backup_path.is_symlink():
                 return f"rollback backup is unavailable or unsafe: {backup_path}"
+            if not _path_under(backup_path, paths.backup_dir):
+                return f"rollback backup is outside installer backup dir: {backup_path}"
         elif backup:
             return f"rollback entry for created file should not include backup: {target}"
 
@@ -875,17 +875,17 @@ def _ordered_rollback_records(
     records: Sequence[Mapping[str, object]],
     manifest_file: Path,
 ) -> List[Mapping[str, object]]:
-    manifest_path = _normalize_path(manifest_file)
+    manifest_path = _normalize_file_target_path(manifest_file)
     reversed_records = list(reversed(records))
     ordinary = [
         record
         for record in reversed_records
-        if _normalize_path(Path(str(record["target"]))) != manifest_path
+        if _normalize_file_target_path(Path(str(record["target"]))) != manifest_path
     ]
     manifest = [
         record
         for record in reversed_records
-        if _normalize_path(Path(str(record["target"]))) == manifest_path
+        if _normalize_file_target_path(Path(str(record["target"]))) == manifest_path
     ]
     return ordinary + manifest
 
@@ -896,7 +896,7 @@ def _rollback_record(
     result: InstallResult,
     dry_run: bool,
 ) -> None:
-    target = _normalize_path(Path(str(record["target"])))
+    target = _normalize_file_target_path(Path(str(record["target"])))
     existed = bool(record.get("existed"))
     backup = record.get("backup")
     restore_immutable = _permissions_restore_immutable(target, paths, record)
@@ -910,7 +910,7 @@ def _rollback_record(
 
     try:
         if existed:
-            backup_path = _normalize_path(Path(str(backup)))
+            backup_path = _normalize_file_target_path(Path(str(backup)))
             _mutate_maybe_permissions_file(
                 target,
                 paths,
@@ -1031,11 +1031,11 @@ def _mutate_maybe_permissions_file(
 
 
 def _manifest_record_present(records: Sequence[object], manifest_file: Path) -> bool:
-    manifest_path = _normalize_path(manifest_file)
+    manifest_path = _normalize_file_target_path(manifest_file)
     for record in records:
         if not isinstance(record, dict) or "target" not in record:
             continue
-        if _normalize_path(Path(str(record["target"]))) == manifest_path:
+        if _normalize_file_target_path(Path(str(record["target"]))) == manifest_path:
             return True
     return False
 

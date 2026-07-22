@@ -668,6 +668,45 @@ load_plugins {{
                 '{"user": "changed"}\n',
             )
 
+    def test_rollback_refuses_symlinked_record_target_before_resolving(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            config_path = paths.tab_namer_config_dir / "config.json"
+            symlink_target = paths.tab_namer_config_dir / "target.json"
+            paths.tab_namer_config_dir.mkdir(parents=True)
+            target_content = '{"generated": true}\n'
+            symlink_target.write_text(target_content, encoding="utf-8")
+            config_path.symlink_to(symlink_target)
+            manifest_data = {
+                "version": 1,
+                "installed_at": "2026-07-22T00:00:00+00:00",
+                "mode": "cli",
+                "backups": [
+                    {
+                        "target": str(config_path),
+                        "backup": None,
+                        "existed": False,
+                        "checksum": installer_module._sha256_file(symlink_target),
+                    }
+                ],
+                "fresh_session_required": False,
+                "verification_command": [],
+            }
+            paths.manifest_file.write_text(
+                json.dumps(manifest_data, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            applied = rollback(paths=paths)
+
+            self.assertEqual(applied.status, "blocked")
+            self.assertIn("rollback target is a symlink", "\n".join(applied.messages))
+            self.assertTrue(config_path.is_symlink())
+            self.assertEqual(
+                symlink_target.read_text(encoding="utf-8"),
+                target_content,
+            )
+
     def test_permission_grants_escape_quoted_paths(self):
         updated, changed = update_permission_grants(
             "",

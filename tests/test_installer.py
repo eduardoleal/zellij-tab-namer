@@ -28,6 +28,7 @@ def make_paths(root):
     tab_namer_dir = root_path / "zellij-tab-namer"
     return InstallPaths(
         zellij_config_dir=config_dir,
+        zellij_config_file=config_dir / "config.kdl",
         plugins_dir=config_dir / "plugins",
         tab_namer_config_dir=tab_namer_dir,
         state_file=root_path / "state" / "state.json",
@@ -84,8 +85,28 @@ class InstallerTests(unittest.TestCase):
                 zellij_config_dir.resolve(strict=False),
             )
             self.assertEqual(
+                paths.zellij_config_file,
+                zellij_config_dir.resolve(strict=False) / "config.kdl",
+            )
+            self.assertEqual(
                 paths.tab_namer_config_dir,
                 root.resolve(strict=False) / ".config" / "zellij-tab-namer",
+            )
+
+    def test_defaults_respect_zellij_config_file_env(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            zellij_config_file = root / "custom" / "zellij.kdl"
+            with patch.dict(
+                os.environ,
+                {"ZELLIJ_CONFIG_FILE": str(zellij_config_file)},
+                clear=True,
+            ):
+                paths = InstallPaths.defaults(home=root)
+
+            self.assertEqual(
+                paths.zellij_config_file,
+                zellij_config_file.resolve(strict=False),
             )
 
     def test_defaults_use_macos_zellij_fallback_when_dot_config_missing(self):
@@ -484,6 +505,46 @@ load_plugins {{
             self.assertTrue(plugin_target.is_symlink())
             self.assertEqual(outside_plugin.read_bytes(), b"\0asmoutside")
             self.assertFalse(paths.manifest_file.exists())
+
+    def test_wasm_uses_explicit_zellij_config_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            config_file = Path(tempdir) / "runtime" / "zellij.kdl"
+            config_file.parent.mkdir(parents=True)
+            config_file.write_text(
+                "plugins {\n}\n\nload_plugins {\n}\n",
+                encoding="utf-8",
+            )
+            paths = InstallPaths(
+                zellij_config_dir=paths.zellij_config_dir,
+                zellij_config_file=config_file,
+                plugins_dir=paths.plugins_dir,
+                tab_namer_config_dir=paths.tab_namer_config_dir,
+                state_file=paths.state_file,
+                permissions_file=paths.permissions_file,
+                backup_dir=paths.backup_dir,
+                manifest_file=paths.manifest_file,
+            )
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            result = install(
+                InstallOptions(
+                    mode="wasm",
+                    dry_run=True,
+                    wasm_source=source,
+                    freeze_permissions=False,
+                    paths=paths,
+                )
+            )
+
+            self.assertEqual(result.status, "complete")
+            config_operations = [
+                operation
+                for operation in result.operations
+                if operation.action == "write zellij config"
+            ]
+            self.assertEqual(len(config_operations), 1)
+            self.assertEqual(config_operations[0].target, str(config_file.resolve(strict=False)))
 
     def test_wasm_dry_run_url_does_not_download_or_write_files(self):
         with tempfile.TemporaryDirectory() as tempdir:

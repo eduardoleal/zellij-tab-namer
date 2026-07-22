@@ -281,6 +281,48 @@ class CLITests(unittest.TestCase):
             self.assertIn("wasm status: blocked", stderr.getvalue())
             self.assertIn("wasm: unavailable", stderr.getvalue())
 
+    def test_install_wasm_uses_explicit_zellij_config_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_file = os.path.join(tempdir, "runtime", "zellij.kdl")
+            os.makedirs(os.path.dirname(config_file))
+            with open(config_file, "w", encoding="utf-8") as handle:
+                handle.write("plugins {\n}\n\nload_plugins {\n}\n")
+            wasm_source = os.path.join(tempdir, "source.wasm")
+            with open(wasm_source, "wb") as handle:
+                handle.write(b"\0asmfixture")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            code = run(
+                [
+                    "install",
+                    "--mode",
+                    "wasm",
+                    "--dry-run",
+                    "--zellij-config-dir",
+                    os.path.join(tempdir, "zellij"),
+                    "--zellij-config-file",
+                    config_file,
+                    "--wasm-source",
+                    wasm_source,
+                    "--tab-namer-config-dir",
+                    os.path.join(tempdir, "zellij-tab-namer"),
+                    "--permissions-file",
+                    os.path.join(tempdir, "cache", "permissions.kdl"),
+                    "--manifest-file",
+                    os.path.join(tempdir, "zellij-tab-namer", "manifest.json"),
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn(
+                f"write zellij config: {os.path.realpath(config_file)}",
+                stdout.getvalue(),
+            )
+            self.assertEqual(stderr.getvalue(), "")
+
     def test_rollback_dry_run_reports_manifest_actions(self):
         with tempfile.TemporaryDirectory() as tempdir:
             manifest = os.path.join(tempdir, "zellij-tab-namer", "manifest.json")

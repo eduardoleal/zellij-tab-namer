@@ -293,6 +293,10 @@ def _add_install_path_options(parser: argparse.ArgumentParser) -> None:
         help="Zellij config directory, defaulting to XDG config or ~/.config/zellij",
     )
     parser.add_argument(
+        "--zellij-config-file",
+        help="Zellij config file to edit, defaulting to ZELLIJ_CONFIG_FILE or <zellij-config-dir>/config.kdl",
+    )
+    parser.add_argument(
         "--plugins-dir",
         help="Zellij plugin directory, defaulting to <zellij-config-dir>/plugins",
     )
@@ -379,6 +383,16 @@ def _emit_result(
 def _install_paths_from_args(args: argparse.Namespace) -> InstallPaths:
     defaults = InstallPaths.defaults()
     zellij_config_dir = _path_arg(args.zellij_config_dir, defaults.zellij_config_dir)
+    default_zellij_config_file = (
+        zellij_config_dir / "config.kdl"
+        if args.zellij_config_dir and not args.zellij_config_file
+        else defaults.zellij_config_file
+    )
+    zellij_config_file = _path_arg(
+        args.zellij_config_file,
+        default_zellij_config_file,
+        file_target=True,
+    )
     plugins_dir = _path_arg(
         args.plugins_dir,
         zellij_config_dir / "plugins",
@@ -390,15 +404,22 @@ def _install_paths_from_args(args: argparse.Namespace) -> InstallPaths:
     state_file = _path_arg(
         getattr(args, "state_file", None),
         defaults.state_file,
+        file_target=True,
     )
-    permissions_file = _path_arg(args.permissions_file, defaults.permissions_file)
+    permissions_file = _path_arg(
+        args.permissions_file,
+        defaults.permissions_file,
+        file_target=True,
+    )
     backup_dir = _path_arg(args.backup_dir, tab_namer_config_dir / "backups")
     manifest_file = _path_arg(
         args.manifest_file,
         tab_namer_config_dir / MANIFEST_FILENAME,
+        file_target=True,
     )
     return InstallPaths(
         zellij_config_dir=zellij_config_dir,
+        zellij_config_file=zellij_config_file,
         plugins_dir=plugins_dir,
         tab_namer_config_dir=tab_namer_config_dir,
         state_file=state_file,
@@ -408,10 +429,17 @@ def _install_paths_from_args(args: argparse.Namespace) -> InstallPaths:
     )
 
 
-def _path_arg(value: Optional[str], default: Path) -> Path:
-    if value:
-        return Path(value).expanduser().resolve(strict=False)
-    return default.expanduser().resolve(strict=False)
+def _path_arg(
+    value: Optional[str],
+    default: Path,
+    file_target: bool = False,
+) -> Path:
+    path = Path(value).expanduser() if value else default.expanduser()
+    if not file_target:
+        return path.resolve(strict=False)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.parent.resolve(strict=False) / path.name
 
 
 def _load_state(path: str) -> Dict[str, Any]:

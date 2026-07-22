@@ -60,6 +60,7 @@ class InstallError(RuntimeError):
 @dataclass(frozen=True)
 class InstallPaths:
     zellij_config_dir: Path
+    zellij_config_file: Path
     plugins_dir: Path
     tab_namer_config_dir: Path
     state_file: Path
@@ -84,9 +85,11 @@ class InstallPaths:
             or Path(os.environ.get("XDG_STATE_HOME", resolved_home / ".local/state"))
         )
         zellij_config_dir = _default_zellij_config_dir(resolved_home, config_root)
+        zellij_config_file = _default_zellij_config_file(zellij_config_dir)
         tab_namer_config_dir = config_root / "zellij-tab-namer"
         return cls(
             zellij_config_dir=zellij_config_dir,
+            zellij_config_file=zellij_config_file,
             plugins_dir=zellij_config_dir / "plugins",
             tab_namer_config_dir=tab_namer_config_dir,
             state_file=state_root / "zellij-tab-namer" / "state.json",
@@ -552,7 +555,7 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
 
 
 def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
-    config_path = options.paths.zellij_config_dir / "config.kdl"
+    config_path = options.paths.zellij_config_file
     _refuse_symlink_target(config_path)
     try:
         config_text = config_path.read_text(encoding="utf-8")
@@ -1098,17 +1101,25 @@ def _normalize_options(options: InstallOptions) -> InstallOptions:
 def _normalize_paths(paths: InstallPaths) -> InstallPaths:
     return InstallPaths(
         zellij_config_dir=_normalize_path(paths.zellij_config_dir),
+        zellij_config_file=_normalize_file_target_path(paths.zellij_config_file),
         plugins_dir=_normalize_path(paths.plugins_dir),
         tab_namer_config_dir=_normalize_path(paths.tab_namer_config_dir),
-        state_file=_normalize_path(paths.state_file),
-        permissions_file=_normalize_path(paths.permissions_file),
+        state_file=_normalize_file_target_path(paths.state_file),
+        permissions_file=_normalize_file_target_path(paths.permissions_file),
         backup_dir=_normalize_path(paths.backup_dir),
-        manifest_file=_normalize_path(paths.manifest_file),
+        manifest_file=_normalize_file_target_path(paths.manifest_file),
     )
 
 
 def _normalize_path(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
+
+
+def _normalize_file_target_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return expanded.parent.resolve(strict=False) / expanded.name
 
 
 def _plugin_url(path: Path) -> str:
@@ -1117,9 +1128,11 @@ def _plugin_url(path: Path) -> str:
 
 def _default_permissions_file(home: Path) -> Path:
     if platform.system() == "Darwin":
-        return home / "Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
+        return _normalize_file_target_path(
+            home / "Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
+        )
     cache_root = Path(os.environ.get("XDG_CACHE_HOME", home / ".cache"))
-    return _normalize_path(cache_root / "zellij" / "permissions.kdl")
+    return _normalize_file_target_path(cache_root / "zellij" / "permissions.kdl")
 
 
 def _default_zellij_config_dir(home: Path, config_root: Path) -> Path:
@@ -1133,6 +1146,13 @@ def _default_zellij_config_dir(home: Path, config_root: Path) -> Path:
             home / "Library/Application Support/org.Zellij-Contributors.Zellij"
         )
     return config_dir
+
+
+def _default_zellij_config_file(zellij_config_dir: Path) -> Path:
+    zellij_config_file_env = os.environ.get("ZELLIJ_CONFIG_FILE")
+    if zellij_config_file_env:
+        return _normalize_file_target_path(Path(zellij_config_file_env))
+    return _normalize_file_target_path(zellij_config_dir / "config.kdl")
 
 
 def _format_number(value: float) -> str:
@@ -1362,6 +1382,7 @@ def _target_allowed(target: Path, paths: InstallPaths) -> bool:
     if any(_path_under(target, root) for root in roots):
         return True
     exact = {
+        _normalize_path(paths.zellij_config_file),
         _normalize_path(paths.permissions_file),
         _normalize_path(paths.manifest_file),
     }

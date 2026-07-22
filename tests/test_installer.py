@@ -88,6 +88,40 @@ class InstallerTests(unittest.TestCase):
                 root.resolve(strict=False) / ".config" / "zellij-tab-namer",
             )
 
+    def test_defaults_use_macos_zellij_fallback_when_dot_config_missing(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with patch("platform.system", return_value="Darwin"), patch.dict(
+                os.environ,
+                {},
+                clear=True,
+            ):
+                paths = InstallPaths.defaults(home=root)
+
+            self.assertEqual(
+                paths.zellij_config_dir,
+                root.resolve(strict=False)
+                / "Library/Application Support/org.Zellij-Contributors.Zellij",
+            )
+
+    def test_defaults_prefer_existing_dot_config_zellij_on_macos(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            config_path = root / ".config" / "zellij" / "config.kdl"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("plugins {\n}\n\nload_plugins {\n}\n", encoding="utf-8")
+            with patch("platform.system", return_value="Darwin"), patch.dict(
+                os.environ,
+                {},
+                clear=True,
+            ):
+                paths = InstallPaths.defaults(home=root)
+
+            self.assertEqual(
+                paths.zellij_config_dir,
+                (root / ".config" / "zellij").resolve(strict=False),
+            )
+
     def test_cli_dry_run_plans_config_without_writing(self):
         with tempfile.TemporaryDirectory() as tempdir:
             paths = make_paths(tempdir)
@@ -224,6 +258,32 @@ load_plugins {
 """
         with self.assertRaises(InstallError):
             wire_zellij_config(config, Path("/tmp/zellij-tab-namer.wasm"), 24)
+
+    def test_wire_zellij_config_keeps_commented_load_entry_idempotent(self):
+        wasm_path = Path("/tmp/zellij-tab-namer.wasm").resolve(strict=False)
+        config = f"""plugins {{
+    zellij-tab-namer location={json.dumps(f"file:{wasm_path}")} {{
+        max_chars 24
+    }}
+}}
+
+load_plugins {{
+    zellij-tab-namer // installed by dotfiles
+}}
+"""
+        wired, changed = wire_zellij_config(
+            config,
+            wasm_path,
+            24,
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(
+            wired.count("\n    zellij-tab-namer // installed by dotfiles\n"),
+            1,
+        )
+        self.assertEqual(wired.count("\n    zellij-tab-namer\n"), 0)
+        self.assertIn("zellij-tab-namer // installed by dotfiles", wired)
 
     def test_permission_grants_are_added_and_idempotent(self):
         permissions = '''"file:/wrong-prefix" {

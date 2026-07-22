@@ -83,12 +83,7 @@ class InstallPaths:
             xdg_state_home
             or Path(os.environ.get("XDG_STATE_HOME", resolved_home / ".local/state"))
         )
-        zellij_config_env = os.environ.get("ZELLIJ_CONFIG_DIR")
-        zellij_config_dir = (
-            _normalize_path(Path(zellij_config_env))
-            if zellij_config_env
-            else config_root / "zellij"
-        )
+        zellij_config_dir = _default_zellij_config_dir(resolved_home, config_root)
         tab_namer_config_dir = config_root / "zellij-tab-namer"
         return cls(
             zellij_config_dir=zellij_config_dir,
@@ -348,7 +343,7 @@ def wire_zellij_config(config_text: str, wasm_path: Path, max_chars: int) -> Tup
     if load_block is None:
         raise InstallError("load_plugins block disappeared while editing config.kdl")
     load_text = next_text[load_block[0] : load_block[1]]
-    if re.search(rf"(?m)^\s*{re.escape(PLUGIN_ALIAS)}\s*$", load_text) is None:
+    if not _kdl_bare_node_present(load_text, PLUGIN_ALIAS):
         next_text = _insert_before_block_close(
             next_text,
             load_block,
@@ -1127,6 +1122,19 @@ def _default_permissions_file(home: Path) -> Path:
     return _normalize_path(cache_root / "zellij" / "permissions.kdl")
 
 
+def _default_zellij_config_dir(home: Path, config_root: Path) -> Path:
+    zellij_config_env = os.environ.get("ZELLIJ_CONFIG_DIR")
+    if zellij_config_env:
+        return _normalize_path(Path(zellij_config_env))
+
+    config_dir = config_root / "zellij"
+    if platform.system() == "Darwin" and not (config_dir / "config.kdl").exists():
+        return _normalize_path(
+            home / "Library/Application Support/org.Zellij-Contributors.Zellij"
+        )
+    return config_dir
+
+
 def _format_number(value: float) -> str:
     if value.is_integer():
         return str(int(value))
@@ -1217,6 +1225,16 @@ def _kdl_node_has_exact_value(text: str, node: str, value: str) -> bool:
     return (
         re.search(
             rf"(?m)^\s*{re.escape(node)}\s+{re.escape(value)}\s*$",
+            text,
+        )
+        is not None
+    )
+
+
+def _kdl_bare_node_present(text: str, node: str) -> bool:
+    return (
+        re.search(
+            rf"(?m)^\s*{re.escape(node)}(?:\s+//.*)?\s*$",
             text,
         )
         is not None

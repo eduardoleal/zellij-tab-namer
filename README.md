@@ -8,21 +8,21 @@ ask an OpenAI-compatible endpoint to compress long labels.
 
 ## Install
 
-Clone the repository to get the installer:
+Because the repository is private, authenticate the GitHub CLI before cloning.
+Run `gh auth login` first if `gh auth status` reports that you are not logged in:
 
 ```sh
-git clone https://github.com/eduardoleal/zellij-tab-namer.git
+gh auth status
+gh repo clone eduardoleal/zellij-tab-namer
 cd zellij-tab-namer
 ```
 
 ### Native WASM plugin
 
-Because the repository is private, use an authenticated GitHub CLI session to
-download the prebuilt `v0.1.0` plugin and its checksum. Run `gh auth login`
-first if needed.
+Use the authenticated GitHub CLI session to download the prebuilt `v0.1.0`
+plugin and its checksum.
 
 ```sh
-gh auth status
 mkdir -p /tmp/zellij-tab-namer-v0.1.0
 gh release download v0.1.0 \
   --repo eduardoleal/zellij-tab-namer \

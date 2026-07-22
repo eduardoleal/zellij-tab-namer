@@ -126,6 +126,28 @@ class InstallerTests(unittest.TestCase):
                 root.resolve(strict=False) / ".config" / "zellij-tab-namer",
             )
 
+    def test_defaults_prefer_existing_home_zellij_config_over_xdg_env(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            xdg_config = root / "xdg-config"
+            home_zellij = root / ".config" / "zellij"
+            home_zellij.mkdir(parents=True)
+            with patch("platform.system", return_value="Linux"), patch.dict(
+                os.environ,
+                {"XDG_CONFIG_HOME": str(xdg_config)},
+                clear=True,
+            ):
+                paths = InstallPaths.defaults(home=root)
+
+            self.assertEqual(
+                paths.zellij_config_dir,
+                home_zellij.resolve(strict=False),
+            )
+            self.assertEqual(
+                paths.tab_namer_config_dir,
+                xdg_config.resolve(strict=False) / "zellij-tab-namer",
+            )
+
     def test_defaults_respect_zellij_config_file_env(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

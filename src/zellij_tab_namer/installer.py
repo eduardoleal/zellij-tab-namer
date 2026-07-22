@@ -1145,6 +1145,10 @@ def _default_zellij_config_dir(home: Path, config_root: Path) -> Path:
         return _normalize_path(Path(zellij_config_env))
 
     config_dir = config_root / "zellij"
+    home_config_dir = _normalize_path(home / ".config" / "zellij")
+    if home_config_dir != _normalize_path(config_dir) and home_config_dir.exists():
+        return home_config_dir
+
     if platform.system() == "Darwin" and not (config_dir / "config.kdl").exists():
         return _normalize_path(
             home / "Library/Application Support/org.Zellij-Contributors.Zellij"

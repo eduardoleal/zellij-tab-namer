@@ -1,52 +1,28 @@
 use std::collections::BTreeMap;
 
-use zellij_tab_namer_plugin::naming::{choose_pane, NamingState, PaneSnapshot, RenameDecision};
+use zellij_tab_namer_plugin::adapter::{Action, Adapter};
+use zellij_tab_namer_plugin::naming::{
+    canonical_source_for_pane, choose_pane, label_for_pane, PaneSnapshot,
+};
 use zellij_tile::prelude::*;
 
-const DEFAULT_MAX_CHARS: usize = 32;
 const DEBOUNCE_SECONDS: f64 = 0.35;
 
+#[derive(Default)]
 struct TabNamer {
-    max_chars: usize,
+    adapter: Option<Adapter>,
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
-    naming: NamingState,
     update_pending: bool,
-}
-
-impl Default for TabNamer {
-    fn default() -> Self {
-        Self {
-            max_chars: DEFAULT_MAX_CHARS,
-            tabs: Vec::new(),
-            panes: PaneManifest::default(),
-            naming: NamingState::default(),
-            update_pending: false,
-        }
-    }
 }
 
 register_plugin!(TabNamer);
 
 impl ZellijPlugin for TabNamer {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        self.max_chars = configuration
-            .get("max_chars")
-            .and_then(|value| value.parse().ok())
-            .filter(|value| (8..=120).contains(value))
-            .unwrap_or(DEFAULT_MAX_CHARS);
-
-        request_permission(&[
-            PermissionType::ReadApplicationState,
-            PermissionType::ChangeApplicationState,
-        ]);
-        subscribe(&[
-            EventType::TabUpdate,
-            EventType::PaneUpdate,
-            EventType::Timer,
-            EventType::CwdChanged,
-            EventType::CommandChanged,
-        ]);
+        let adapter = Adapter::new(configuration);
+        self.execute(adapter.load_actions());
+        self.adapter = Some(adapter);
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -64,6 +40,20 @@ impl ZellijPlugin for TabNamer {
                 self.update_pending = false;
                 self.reconcile_tabs();
             }
+            Event::PermissionRequestResult(status) => {
+                if let Some(adapter) = &mut self.adapter {
+                    adapter.permission_result(status == PermissionStatus::Granted);
+                }
+                self.schedule_update();
+            }
+            Event::WebRequestResult(status, _, body, context) => {
+                let actions = self
+                    .adapter
+                    .as_mut()
+                    .map(|adapter| adapter.web_result(status, &body, &context))
+                    .unwrap_or_default();
+                self.execute(actions);
+            }
             _ => {}
         }
         false
@@ -80,20 +70,36 @@ impl TabNamer {
 
     fn reconcile_tabs(&mut self) {
         let active_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.tab_id).collect();
-        self.naming.retain_tabs(&active_tab_ids);
+        let retain_actions = self
+            .adapter
+            .as_mut()
+            .map(|adapter| adapter.retain_tabs(&active_tab_ids))
+            .unwrap_or_default();
+        self.execute(retain_actions);
 
-        for tab in &self.tabs {
-            let snapshots = self.snapshots_for_tab(tab);
-            let Some(pane) = choose_pane(&snapshots) else {
-                continue;
-            };
+        let max_chars = self.adapter.as_ref().map(Adapter::max_chars).unwrap_or(32);
+        let work: Vec<_> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let snapshots = self.snapshots_for_tab(tab);
+                let pane = choose_pane(&snapshots)?;
+                Some((
+                    tab.tab_id,
+                    tab.name.clone(),
+                    canonical_source_for_pane(pane),
+                    label_for_pane(pane, max_chars),
+                ))
+            })
+            .collect();
 
-            if let RenameDecision::Rename(candidate) =
-                self.naming
-                    .decision(tab.tab_id, &tab.name, pane, self.max_chars)
-            {
-                rename_tab_with_id(tab.tab_id as u64, candidate);
-            }
+        for (tab_id, current_name, source, fallback) in work {
+            let actions = self
+                .adapter
+                .as_mut()
+                .map(|adapter| adapter.reconcile(tab_id, &current_name, &source, &fallback))
+                .unwrap_or_default();
+            self.execute(actions);
         }
     }
 
@@ -123,5 +129,43 @@ impl TabNamer {
                 }
             })
             .collect()
+    }
+
+    fn execute(&self, actions: Vec<Action>) {
+        for action in actions {
+            match action {
+                Action::RequestPermissions { web_access } => {
+                    let mut permissions = vec![
+                        PermissionType::ReadApplicationState,
+                        PermissionType::ChangeApplicationState,
+                    ];
+                    if web_access {
+                        permissions.push(PermissionType::WebAccess);
+                    }
+                    request_permission(&permissions);
+                }
+                Action::Subscribe { web_results } => {
+                    let mut events = vec![
+                        EventType::TabUpdate,
+                        EventType::PaneUpdate,
+                        EventType::Timer,
+                        EventType::CwdChanged,
+                        EventType::CommandChanged,
+                    ];
+                    if web_results {
+                        events.push(EventType::WebRequestResult);
+                    }
+                    subscribe(&events);
+                }
+                Action::Rename { tab_id, label } => rename_tab_with_id(tab_id as u64, &label),
+                Action::WebRequest {
+                    url,
+                    headers,
+                    body,
+                    context,
+                } => web_request(url, HttpVerb::Post, headers, body, context),
+                Action::Diagnostic { category } => eprintln!("zellij-tab-namer: {category:?}"),
+            }
+        }
     }
 }

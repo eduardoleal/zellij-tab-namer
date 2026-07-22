@@ -1,13 +1,10 @@
 # zellij-tab-namer
 
-`zellij-tab-namer` is a dependency-free Python watcher that names Zellij tabs
-from the state Zellij already exposes. It reads pane titles first, falls back to
-`project - activity`, and can optionally ask an OpenAI-compatible endpoint to
-compress long labels.
-
-The first slice is a companion CLI, not a native Zellij plugin. That keeps the
-naming policy easy to test before any headless plugin permission wiring is
-added to the dot-config repo.
+`zellij-tab-namer` names Zellij tabs from the state Zellij already exposes. It
+ships both a dependency-free Python watcher and a native headless WASM plugin.
+Both read pane titles first, protect manual tab names, and use deterministic
+local fallbacks when no useful title is available. The Python watcher can also
+ask an OpenAI-compatible endpoint to compress long labels.
 
 ## Install
 
@@ -30,9 +27,8 @@ then runs the setup command:
 For local development, set `ZELLIJ_TAB_NAMER_EDITABLE=1` before running the
 script to request an editable install.
 
-By default `zellij-tab-namer install` uses `--mode both`: it configures the CLI
-watcher path today and reports the native WASM path as unavailable until a
-plugin artifact is provided.
+By default `zellij-tab-namer install` uses `--mode both`. Pass the locally built
+artifact with `--wasm-source` when installing the native path.
 
 ## Usage
 
@@ -82,8 +78,13 @@ automatic headless startup belongs to the native WASM plugin path.
 zellij-tab-namer install --mode cli --max-chars 28 --interval 2 --no-llm
 ```
 
-WASM mode expects a plugin artifact. Until releases publish
-`zellij-tab-namer.wasm`, use `--wasm-source` for a local artifact:
+Build the native plugin with Cargo and install the resulting artifact:
+
+```sh
+rustup target add wasm32-wasip1
+cargo test --lib
+cargo build --release --target wasm32-wasip1 --bin zellij-tab-namer
+```
 
 ```sh
 zellij-tab-namer install --mode wasm \
@@ -110,8 +111,9 @@ not delete sessions or restart Zellij for you.
 Permission grants are written to Zellij's platform cache path by default
 (`~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl` on macOS,
 `$XDG_CACHE_HOME/zellij/permissions.kdl` or `~/.cache/zellij/permissions.kdl`
-elsewhere) and keyed by the same `file:/.../zellij-tab-namer.wasm` plugin URL
-that `config.kdl` loads.
+elsewhere). Zellij loads the plugin from a `file:/...` URL in `config.kdl`, but
+its permission cache keys the grant by the normalized absolute WASM path with
+no `file:` prefix.
 
 Rollback uses the latest manifest:
 
@@ -158,9 +160,32 @@ manual override and skipped. Use `--force` for a deliberate one-off refresh.
 If the state file is lost, the watcher errs on the side of preserving clear
 non-default tab names rather than overwriting them.
 
-## Native Plugin Path
+## Native Plugin
 
-The future Zellij WASM plugin can reuse this naming policy after the CLI proves
-the behavior. Installer support for artifact placement, `config.kdl` startup
-wiring, permission grants, backups, and rollback is present now; the native
-plugin artifact itself is still a future deliverable.
+The Rust plugin subscribes to Zellij pane and tab updates, debounces bursts of
+events, and renames tabs by stable ID. It uses the best eligible non-plugin pane
+title, queries Zellij for that pane's working directory and running command for
+the deterministic `project - activity` fallback, and never reads pane contents
+or scrollback. Existing non-default names are preserved as manual overrides;
+clearing a tab name
+re-enables automatic naming for that tab.
+
+The plugin requests `ReadApplicationState` and `ChangeApplicationState` and is
+designed to run headlessly through `load_plugins`. A fresh Zellij server is
+required after pre-granting those permissions. Native LLM compression is not
+yet included; long labels are shortened locally without network access.
+
+## Releases
+
+GitHub Actions builds and checks the native plugin for pull requests, pushes to
+`main`, and manual workflow runs. Each successful run publishes a workflow
+artifact named `zellij-tab-namer-wasm` containing:
+
+- `zellij-tab-namer.wasm`
+- `zellij-tab-namer.wasm.sha256`
+
+To publish those files on a GitHub Release, update the package version in
+`Cargo.toml`, create the matching `v<version>` tag, and push it. For example,
+version `0.1.0` is released from tag `v0.1.0`. Published release assets are
+immutable: rebuilding an existing release tag does not replace them. Publish a
+new version and tag when the artifact changes.

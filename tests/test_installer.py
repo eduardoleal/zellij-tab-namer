@@ -380,8 +380,30 @@ load_plugins {{
         self.assertTrue(changed)
         self.assertFalse(changed_again)
         normalized_path = Path("/tmp/plugins/zellij-tab-namer.wasm").resolve(strict=False)
-        self.assertEqual(updated_again.count(f'"file:{normalized_path}"'), 1)
+        self.assertEqual(updated_again.count(f'"{normalized_path}"'), 1)
         self.assertIn("ChangeApplicationState", updated_again)
+
+    def test_permission_grants_migrate_legacy_file_url_key(self):
+        normalized_path = Path(
+            "/tmp/plugins/zellij-tab-namer.wasm"
+        ).resolve(strict=False)
+        permissions = (
+            f'"file:{normalized_path}" {{\n'
+            "    ReadApplicationState\n"
+            "}\n"
+        )
+
+        updated, changed = update_permission_grants(
+            permissions,
+            normalized_path,
+            ["ReadApplicationState", "ChangeApplicationState"],
+        )
+
+        self.assertTrue(changed)
+        self.assertNotIn(f'"file:{normalized_path}"', updated)
+        self.assertEqual(updated.count(f'"{normalized_path}"'), 1)
+        self.assertIn("ReadApplicationState", updated)
+        self.assertIn("ChangeApplicationState", updated)
 
     def test_permission_grants_accept_current_zellij_names(self):
         updated, changed = update_permission_grants(
@@ -436,7 +458,11 @@ load_plugins {{
             self.assertIn("zellij-tab-namer location=", config)
             self.assertIn("\n    zellij-tab-namer\n", config)
             self.assertIn(
-                f"file:{(paths.plugins_dir / 'zellij-tab-namer.wasm').resolve(strict=False)}",
+                str(
+                    (paths.plugins_dir / "zellij-tab-namer.wasm").resolve(
+                        strict=False
+                    )
+                ),
                 permissions,
             )
             self.assertIn("ChangeApplicationState", permissions)
@@ -738,8 +764,7 @@ load_plugins {{
 
         self.assertTrue(changed)
         quoted_path = Path('/tmp/plugins/zellij"tab.wasm').resolve(strict=False)
-        normalized_path = f"file:{quoted_path}"
-        self.assertIn(json.dumps(normalized_path), updated)
+        self.assertIn(json.dumps(str(quoted_path)), updated)
 
     def test_wasm_apply_rolls_back_artifact_when_later_write_fails(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -985,7 +1010,9 @@ load_plugins {{
                 encoding="utf-8",
             )
             source = write_wasm(Path(tempdir) / "source.wasm")
-            target_url = f"file:{(paths.plugins_dir / 'zellij-tab-namer.wasm').resolve(strict=False)}"
+            target_url = str(
+                (paths.plugins_dir / "zellij-tab-namer.wasm").resolve(strict=False)
+            )
             original_permissions = (
                 f"{json.dumps(target_url)} {{\n"
                 "    ReadApplicationState\n"

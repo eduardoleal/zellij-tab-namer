@@ -367,8 +367,24 @@ def update_permission_grants(
     if not _balanced_kdl(permissions_text):
         raise InstallError("permissions.kdl appears malformed; refusing to edit it")
 
-    key = _kdl_string(_plugin_url(wasm_path))
+    # Zellij loads local plugins through a file: URL, but its permission cache
+    # indexes grants by the normalized absolute filesystem path.
+    key = _kdl_string(str(_normalize_path(wasm_path)))
+    changed = False
     block = _find_exact_quoted_block(permissions_text, key)
+    if block is None:
+        legacy_key = _kdl_string(_plugin_url(wasm_path))
+        legacy_block = _find_exact_quoted_block(permissions_text, legacy_key)
+        if legacy_block is not None:
+            legacy_text = permissions_text[legacy_block[0] : legacy_block[1]]
+            migrated_text = legacy_text.replace(legacy_key, key, 1)
+            permissions_text = (
+                permissions_text[: legacy_block[0]]
+                + migrated_text
+                + permissions_text[legacy_block[1] :]
+            )
+            block = _find_exact_quoted_block(permissions_text, key)
+            changed = True
     if block is None:
         grant_lines = "".join(f"    {permission}\n" for permission in normalized_grants)
         addition = f"{key} {{\n{grant_lines}}}\n"
@@ -382,7 +398,7 @@ def update_permission_grants(
         if re.search(rf"(?m)^\s*{re.escape(permission)}\s*$", block_text) is None
     ]
     if not missing:
-        return permissions_text, False
+        return permissions_text, changed
 
     addition = "".join(f"    {permission}\n" for permission in missing)
     return _insert_before_block_close(permissions_text, block, addition), True

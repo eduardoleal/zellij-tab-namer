@@ -1,0 +1,23 @@
+[package]
+name = "zellij-tab-namer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zellij-tile = "=0.44.0"
+
+[[bin]]
+name = "zellij-tab-namer"
+path = "rust/src/main.rs"
+test = false
+
+[lib]
+name = "zellij_tab_namer_plugin"
+path = "rust/src/lib.rs"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+opt-level = "s"
+

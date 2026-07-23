@@ -13,15 +13,9 @@ deterministic local labels when model refinement is disabled or unavailable.
 
 ## Install
 
-Because the tap and source repository are private, installation still requires
-GitHub access. The Homebrew path uses SSH for the tap and a read-only API token
-for release downloads; it does not require the GitHub CLI.
-
 ### Homebrew
 
 ```sh
-export HOMEBREW_GITHUB_API_TOKEN="your-fine-grained-github-token"
-brew tap eduardoleal/tap git@github.com:eduardoleal/homebrew-tap.git
 brew install eduardoleal/tap/zellij-tab-namer
 
 zellij-tab-namer install --mode wasm \
@@ -29,35 +23,35 @@ zellij-tab-namer install --mode wasm \
 zellij delete-all-sessions --force
 ```
 
-Create the token in GitHub's web settings and grant it read-only access to this
-repository. The formula installs the checksum-pinned v0.2.0 source archive and
-published WASM release asset, then prints the one-time Zellij setup command as
-its caveat. The setup command edits Zellij configuration and pre-grants the
-headless plugin permissions; run the final command from outside Zellij so a
-fresh server loads them.
+The formula installs the checksum-pinned v0.2.0 source archive and published
+WASM release asset, then prints the one-time Zellij setup command as its caveat.
+The setup command edits Zellij configuration and pre-grants the headless plugin
+permissions; run the final command from outside Zellij so a fresh server loads
+them.
 
 ### Source checkout for non-Homebrew installs
 
 The released-WASM and Python-watcher paths below run `install.sh` from an
-authenticated source checkout. Clone it once before using either path:
+source checkout. Clone it once before using either path:
 
 ```sh
-gh repo clone eduardoleal/zellij-tab-namer
+git clone https://github.com/eduardoleal/zellij-tab-namer.git
 cd zellij-tab-namer
 ```
 
 ### Released native WASM plugin
 
-To install without Homebrew, use GitHub CLI to download the prebuilt `v0.2.0`
-plugin and its checksum.
+To install without Homebrew, download the prebuilt `v0.2.0` plugin and its
+checksum.
 
 ```sh
 mkdir -p /tmp/zellij-tab-namer-v0.2.0
-gh release download v0.2.0 \
-  --repo eduardoleal/zellij-tab-namer \
-  --pattern 'zellij-tab-namer.wasm*' \
-  --dir /tmp/zellij-tab-namer-v0.2.0 \
-  --clobber
+curl -fL \
+  -o /tmp/zellij-tab-namer-v0.2.0/zellij-tab-namer.wasm \
+  https://github.com/eduardoleal/zellij-tab-namer/releases/download/v0.2.0/zellij-tab-namer.wasm
+curl -fL \
+  -o /tmp/zellij-tab-namer-v0.2.0/zellij-tab-namer.wasm.sha256 \
+  https://github.com/eduardoleal/zellij-tab-namer/releases/download/v0.2.0/zellij-tab-namer.wasm.sha256
 
 (cd /tmp/zellij-tab-namer-v0.2.0 && \
   shasum -a 256 -c zellij-tab-namer.wasm.sha256)

@@ -13,15 +13,15 @@ deterministic local labels when model refinement is disabled or unavailable.
 
 ## Install
 
-Because the tap and source repository are private, authenticate GitHub before
-installing. Run `gh auth login` first if `gh auth status` reports that you are
-not logged in.
+Because the tap and source repository are private, installation still requires
+GitHub access. The Homebrew path uses SSH for the tap and a read-only API token
+for release downloads; it does not require the GitHub CLI.
 
 ### Homebrew
 
 ```sh
-gh auth status
-gh auth setup-git
+export HOMEBREW_GITHUB_API_TOKEN="your-fine-grained-github-token"
+brew tap eduardoleal/tap git@github.com:eduardoleal/homebrew-tap.git
 brew install eduardoleal/tap/zellij-tab-namer
 
 zellij-tab-namer install --mode wasm \
@@ -29,8 +29,9 @@ zellij-tab-namer install --mode wasm \
 zellij delete-all-sessions --force
 ```
 
-The formula builds the pinned upstream release, installs both the management
-CLI and native WASM artifact, and prints the one-time Zellij setup command as
+Create the token in GitHub's web settings and grant it read-only access to this
+repository. The formula installs the checksum-pinned v0.2.0 source archive and
+published WASM release asset, then prints the one-time Zellij setup command as
 its caveat. The setup command edits Zellij configuration and pre-grants the
 headless plugin permissions; run the final command from outside Zellij so a
 fresh server loads them.

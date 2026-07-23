@@ -13,41 +13,64 @@ deterministic local labels when model refinement is disabled or unavailable.
 
 ## Install
 
-Because the repository is private, authenticate the GitHub CLI before cloning.
-Run `gh auth login` first if `gh auth status` reports that you are not logged in:
+Because the tap and source repository are private, authenticate GitHub before
+installing. Run `gh auth login` first if `gh auth status` reports that you are
+not logged in.
+
+### Homebrew
 
 ```sh
 gh auth status
+gh auth setup-git
+brew install eduardoleal/tap/zellij-tab-namer
+
+zellij-tab-namer install --mode wasm \
+  --wasm-source "$(brew --prefix zellij-tab-namer)/libexec/plugin/zellij-tab-namer.wasm"
+zellij delete-all-sessions --force
+```
+
+The formula builds the pinned upstream release, installs both the management
+CLI and native WASM artifact, and prints the one-time Zellij setup command as
+its caveat. The setup command edits Zellij configuration and pre-grants the
+headless plugin permissions; run the final command from outside Zellij so a
+fresh server loads them.
+
+### Source checkout for non-Homebrew installs
+
+The released-WASM and Python-watcher paths below run `install.sh` from an
+authenticated source checkout. Clone it once before using either path:
+
+```sh
 gh repo clone eduardoleal/zellij-tab-namer
 cd zellij-tab-namer
 ```
 
 ### Released native WASM plugin
 
-Use the authenticated GitHub CLI session to download the prebuilt `v0.1.0`
+To install without Homebrew, use GitHub CLI to download the prebuilt `v0.2.0`
 plugin and its checksum.
 
 ```sh
-mkdir -p /tmp/zellij-tab-namer-v0.1.0
-gh release download v0.1.0 \
+mkdir -p /tmp/zellij-tab-namer-v0.2.0
+gh release download v0.2.0 \
   --repo eduardoleal/zellij-tab-namer \
   --pattern 'zellij-tab-namer.wasm*' \
-  --dir /tmp/zellij-tab-namer-v0.1.0 \
+  --dir /tmp/zellij-tab-namer-v0.2.0 \
   --clobber
 
-(cd /tmp/zellij-tab-namer-v0.1.0 && \
+(cd /tmp/zellij-tab-namer-v0.2.0 && \
   shasum -a 256 -c zellij-tab-namer.wasm.sha256)
 
 ./install.sh --mode wasm \
-  --wasm-source /tmp/zellij-tab-namer-v0.1.0/zellij-tab-namer.wasm \
-  --wasm-sha256 31b074209af582f580f5c1af0763739a4b3ca9d9c60828823ad49d8505aee5b3 \
+  --wasm-source /tmp/zellij-tab-namer-v0.2.0/zellij-tab-namer.wasm \
+  --wasm-sha256 e6f4eb2f404a86dd27cb318d4ce4365869e44ca578b30e1a33932bc73682465b \
   --wasm-permission ReadApplicationState \
   --wasm-permission ChangeApplicationState
 ```
 
 The checksum command and installer both verify the release before changing
 Zellij configuration. The release assets are available from the
-[`v0.1.0` release](https://github.com/eduardoleal/zellij-tab-namer/releases/tag/v0.1.0).
+[`v0.2.0` release](https://github.com/eduardoleal/zellij-tab-namer/releases/tag/v0.2.0).
 Start a fresh Zellij session after installation so the plugin and pre-granted
 permissions are loaded.
 

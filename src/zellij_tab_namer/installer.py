@@ -1496,8 +1496,14 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
         keybinds[0] + session_in_keybinds[1],
     )
     block = text[session[0] : session[1]]
-    if re.search(r'(?m)^\s*bind\s+"l"\s*\{', block):
-        if PLUGIN_ALIAS not in block:
+    binding_match = re.search(r'(?m)^\s*bind\s+"l"\s*\{', block)
+    if binding_match:
+        open_brace = block.find("{", binding_match.start(), binding_match.end())
+        close_brace = _matching_brace(block, open_brace)
+        if close_brace is None:
+            raise InstallError("session l binding is not balanced")
+        existing_binding = block[binding_match.start() : close_brace + 1]
+        if PLUGIN_ALIAS not in existing_binding:
             raise InstallError("session mode already binds l; refusing to replace it")
         return text, False
     return _insert_before_block_close(text, session, binding), True

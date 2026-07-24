@@ -18,6 +18,7 @@ struct TabNamer {
     session_name: Option<String>,
     session_input: String,
     session_locked: Option<bool>,
+    session_command_generation: u64,
     session_status: String,
     pending_session_name: Option<String>,
 }
@@ -133,7 +134,7 @@ impl TabNamer {
         }
     }
 
-    fn session_command(&self, operation: &str, name: &str) {
+    fn session_command(&mut self, operation: &str, name: &str) {
         let Some(adapter) = &self.adapter else {
             return;
         };
@@ -142,9 +143,14 @@ impl TabNamer {
         if state_file.trim().is_empty() {
             return;
         }
+        self.session_command_generation += 1;
         let context = BTreeMap::from([
             ("session_lock_operation".to_owned(), operation.to_owned()),
             ("session_lock_name".to_owned(), name.to_owned()),
+            (
+                "session_lock_generation".to_owned(),
+                self.session_command_generation.to_string(),
+            ),
         ]);
         run_command(
             &[
@@ -179,6 +185,15 @@ impl TabNamer {
         let Some(name) = context.get("session_lock_name") else {
             return;
         };
+        let Some(generation) = context
+            .get("session_lock_generation")
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return;
+        };
+        if generation != self.session_command_generation {
+            return;
+        }
         if self.session_name.as_deref() != Some(name.as_str()) {
             return;
         }

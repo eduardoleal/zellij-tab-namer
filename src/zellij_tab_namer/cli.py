@@ -153,7 +153,9 @@ def _run_once(
 
     if applied:
         try:
-            _save_state(args.state_file, next_state)
+            with _locked_state(args.state_file) as latest_state:
+                latest_state["generated"] = next_state["generated"]
+                _save_state(args.state_file, latest_state)
         except OSError as exc:
             stderr.write(f"failed to write state file: {exc}\n")
             return 1

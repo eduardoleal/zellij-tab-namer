@@ -12,7 +12,30 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      - uses: googleapis/release-please-action@v4
+      - id: release
+        uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: steps.release.outputs.release_created == 'true'
+        with:
+          ref: ${{ steps.release.outputs.tag_name }}
+
+      - name: Build and upload release assets
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          RUST_VERSION: 1.97.1
+          WASM_TARGET: wasm32-wasip1
+          WASM_BINARY: zellij-tab-namer
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$WASM_TARGET"
+          rustup default "$RUST_VERSION"
+          cargo build --locked --release --target "$WASM_TARGET" --bin "$WASM_BINARY"
+          mkdir dist
+          install -m 0644 "target/$WASM_TARGET/release/$WASM_BINARY.wasm" "dist/$WASM_BINARY.wasm"
+          cd dist
+          sha256sum "$WASM_BINARY.wasm" > "$WASM_BINARY.wasm.sha256"
+          gh release upload "${{ steps.release.outputs.tag_name }}" "$WASM_BINARY.wasm" "$WASM_BINARY.wasm.sha256"

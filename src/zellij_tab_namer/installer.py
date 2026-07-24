@@ -1496,8 +1496,11 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
         keybinds[0] + session_in_keybinds[1],
     )
     block = text[session[0] : session[1]]
-    binding_match = re.search(r'(?m)^\s*bind\s+"l"\s*\{', block)
+    binding_match = re.search(r'(?m)^\s*bind\s+"(?:\\.|[^"\\])*"(?:\s+"(?:\\.|[^"\\])*")*\s*\{', block)
     if binding_match:
+        keys = re.findall(r'"((?:\\.|[^"\\])*)"', binding_match.group())
+        if "l" not in keys:
+            return _insert_before_block_close(text, session, binding), True
         open_brace = block.find("{", binding_match.start(), binding_match.end())
         close_brace = _matching_brace(block, open_brace)
         if close_brace is None:

@@ -1464,17 +1464,6 @@ def _reconcile_root_close_behavior(text: str) -> Tuple[str, bool]:
 
 
 def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
-    session = _find_named_block(text, "session")
-    if session is None:
-        # Minimal Zellij configurations may intentionally omit custom modes.
-        # Keep the existing installer compatible; users can add the binding
-        # through their normal keybind configuration when they enable it.
-        return text, False
-    block = text[session[0] : session[1]]
-    if re.search(r'(?m)^\s*bind\s+"l"\s*\{', block):
-        if PLUGIN_ALIAS not in block:
-            raise InstallError("session mode already binds l; refusing to replace it")
-        return text, False
     binding = (
         '        bind "l" {\n'
         f'            LaunchPlugin "{PLUGIN_ALIAS}" {{\n'
@@ -1485,6 +1474,26 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
         '            SwitchToMode "normal"\n'
         '        }\n'
     )
+    keybinds = _find_named_block(text, "keybinds")
+    if keybinds is None:
+        keybinds_block = "keybinds {\n    session {\n" + binding + "    }\n}\n\n"
+        return keybinds_block + text, True
+
+    keybinds_text = text[keybinds[0] : keybinds[1]]
+    session_in_keybinds = _find_named_block(keybinds_text, "session")
+    if session_in_keybinds is None:
+        session_block = "    session {\n" + binding + "    }\n"
+        return _insert_before_block_close(text, keybinds, session_block), True
+
+    session = (
+        keybinds[0] + session_in_keybinds[0],
+        keybinds[0] + session_in_keybinds[1],
+    )
+    block = text[session[0] : session[1]]
+    if re.search(r'(?m)^\s*bind\s+"l"\s*\{', block):
+        if PLUGIN_ALIAS not in block:
+            raise InstallError("session mode already binds l; refusing to replace it")
+        return text, False
     return _insert_before_block_close(text, session, binding), True
 
 

@@ -324,8 +324,6 @@ load_plugins {
 
     def test_wire_zellij_config_adds_dedicated_session_lock_prompt(self):
         config = """keybinds {
-    session {
-    }
 }
 
 plugins {
@@ -344,9 +342,30 @@ load_plugins {
         )
 
         self.assertTrue(changed)
+        self.assertIn("    session {", wired)
         self.assertIn('LaunchPlugin "zellij-tab-namer" {', wired)
         self.assertNotIn("LaunchOrFocusPlugin", wired)
         self.assertIn('configuration { role "session-lock" }', wired)
+
+    def test_wire_zellij_config_creates_keybinds_for_session_lock_prompt(self):
+        config = """plugins {
+}
+
+load_plugins {
+}
+"""
+
+        wired, changed = wire_zellij_config(
+            config,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            session_lock_command="zellij-tab-namer",
+            session_lock_state_file=Path("/tmp/state.json"),
+        )
+
+        self.assertTrue(changed)
+        self.assertTrue(wired.startswith("keybinds {\n    session {\n"))
+        self.assertIn('LaunchPlugin "zellij-tab-namer" {', wired)
 
     def test_wire_zellij_config_preserves_indented_close_comment_and_newline(self):
         config = """    on_force_close "detach" // preserve this comment

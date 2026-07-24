@@ -217,6 +217,7 @@ impl TabNamer {
         self.session_locked = Some(locked);
         match operation.as_str() {
             "query" if locked => reconfigure("on_force_close \"detach\"".to_owned(), false),
+            "query" => reconfigure("on_force_close \"quit\"".to_owned(), false),
             "mark" if locked => {
                 reconfigure("on_force_close \"detach\"".to_owned(), false);
                 self.session_status = "Locked — detaches on terminal close".to_owned();
@@ -254,9 +255,14 @@ impl TabNamer {
                 }) && !self.session_input.is_empty()
                     && self.session_input.chars().count() <= 64
                 {
-                    rename_session(&self.session_input);
-                    self.pending_session_name = Some(self.session_input.clone());
-                    self.session_status = "Renaming session…".to_owned();
+                    if self.session_name.as_deref() == Some(self.session_input.as_str()) {
+                        self.session_command("mark", &self.session_input.clone());
+                        self.session_status = "Locking session…".to_owned();
+                    } else {
+                        rename_session(&self.session_input);
+                        self.pending_session_name = Some(self.session_input.clone());
+                        self.session_status = "Renaming session…".to_owned();
+                    }
                 } else {
                     self.session_status = "Use 1–64 letters, digits, spaces, ., _, or -".to_owned();
                 }

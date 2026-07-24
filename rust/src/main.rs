@@ -274,7 +274,7 @@ impl TabNamer {
             .ok()
             .and_then(|value| value.get("changed").and_then(|value| value.as_bool()));
         match operation.as_str() {
-            "query" if locked && !self.session_role => {
+            "query" if !self.session_role => {
                 self.session_command("query-confirm", name);
             }
             "query" | "query-confirm" if locked => {

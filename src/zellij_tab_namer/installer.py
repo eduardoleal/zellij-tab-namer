@@ -1457,7 +1457,11 @@ def _reconcile_root_close_behavior(text: str) -> Tuple[str, bool]:
         r'(?m)^(?P<indent>[ \t]*)on_force_close[ \t]+"(?:\\.|[^"\\])*"'
         r'(?P<suffix>[ \t]*(?://[^\r\n]*)?)$'
     )
-    matches = list(pattern.finditer(text))
+    matches = [
+        match
+        for match in pattern.finditer(text)
+        if _kdl_brace_depth_at(text, match.start()) == 0
+    ]
     if len(matches) > 1:
         raise InstallError("config contains multiple on_force_close nodes; edit manually")
     if matches:
@@ -1467,6 +1471,43 @@ def _reconcile_root_close_behavior(text: str) -> Tuple[str, bool]:
         return updated, updated != text
     replacement = 'on_force_close "quit"'
     return replacement + "\n\n" + text, True
+
+
+def _kdl_brace_depth_at(text: str, target_index: int) -> int:
+    depth = 0
+    in_string = False
+    escaped = False
+    in_line_comment = False
+    index = 0
+    while index < target_index:
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < target_index else ""
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            index += 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            in_line_comment = True
+            index += 2
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return depth
 
 
 def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:

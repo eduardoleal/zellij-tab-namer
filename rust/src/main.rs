@@ -246,7 +246,10 @@ impl TabNamer {
                 self.session_input.pop();
             }
             BareKey::Enter => {
-                if self.session_locked == Some(true) {
+                if self.session_locked.is_none() {
+                    self.query_session_lock();
+                    self.session_status = "Retrying session lock query…".to_owned();
+                } else if self.session_locked == Some(true) {
                     if let Some(name) = self.session_name.clone() {
                         self.session_command("unmark", &name);
                     }

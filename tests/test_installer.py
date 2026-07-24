@@ -462,6 +462,29 @@ load_plugins {
         self.assertTrue(changed)
         self.assertIn('    on_force_close "quit" // preserve this comment\nplugins {', wired)
 
+    def test_wire_zellij_config_ignores_nested_close_behavior(self):
+        config = """plugins {
+    other location="file:/tmp/other.wasm" {
+        on_force_close "detach"
+    }
+}
+
+load_plugins {
+}
+"""
+
+        wired, changed = wire_zellij_config(
+            config,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            session_lock_command="zellij-tab-namer",
+            session_lock_state_file=Path("/tmp/state.json"),
+        )
+
+        self.assertTrue(changed)
+        self.assertIn('\n\non_force_close "quit"\n\nplugins {', wired)
+        self.assertIn('        on_force_close "detach"', wired)
+
     def test_wire_zellij_config_updates_managed_values_preserving_unknown_nodes(self):
         config = """plugins {
     zellij-tab-namer location="file:/tmp/zellij-tab-namer.wasm" {

@@ -210,6 +210,16 @@ class CLITests(unittest.TestCase):
             )
             self.assertIn("renamed tab 1", stdout.getvalue())
 
+    def test_once_preserves_session_locks_when_saving_generated_state(self):
+        runner = FakeRunner(panes=[{"tab_id": 1, "tab_name": "Tab #1", "title": "Build", "pane_command": "fish", "pane_cwd": "/tmp", "is_focused": True, "is_floating": False}])
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_file = os.path.join(tempdir, "state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                json.dump({"generated": {}, "session_locks": {"platform": True}}, handle)
+            self.assertEqual(run(["once", "--state-file", state_file], command_runner=runner, stdout=io.StringIO(), stderr=io.StringIO()), 0)
+            with open(state_file, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["session_locks"], {"platform": True})
+
     def test_invalid_json_returns_failure(self):
         runner = FakeRunner(list_result=completed(stdout="{not-json"))
         stderr = io.StringIO()

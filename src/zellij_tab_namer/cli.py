@@ -108,6 +108,9 @@ def _run_once(
         compressor=compressor,
         force=args.force,
     )
+    session_locks = state.get("session_locks")
+    if isinstance(session_locks, dict):
+        next_state["session_locks"] = dict(session_locks)
 
     applied = 0
     for decision in decisions:

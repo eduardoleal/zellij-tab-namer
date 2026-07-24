@@ -71,7 +71,9 @@ impl ZellijPlugin for TabNamer {
                 if let Some(name) = mode.session_name {
                     if self.pending_session_name.as_deref() == Some(name.as_str()) {
                         self.pending_session_name = None;
+                        self.session_name = Some(name.clone());
                         self.session_command("mark", &name);
+                        return self.session_role;
                     }
                     if self.session_name.as_deref() == Some(name.as_str()) {
                         return self.session_role;

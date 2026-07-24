@@ -129,9 +129,13 @@ impl Adapter {
         self.config.max_chars
     }
 
-    pub fn session_lock_command(&self) -> String { self.config.session_lock_command.clone() }
+    pub fn session_lock_command(&self) -> String {
+        self.config.session_lock_command.clone()
+    }
 
-    pub fn session_lock_state_file(&self) -> String { self.config.session_lock_state_file.clone() }
+    pub fn session_lock_state_file(&self) -> String {
+        self.config.session_lock_state_file.clone()
+    }
 
     pub fn load_actions(&self) -> Vec<Action> {
         let web_access = self.config.ollama.is_some();

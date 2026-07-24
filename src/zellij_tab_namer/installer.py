@@ -1447,14 +1447,19 @@ def _find_named_block(text: str, name: str) -> Optional[Tuple[int, int]]:
 
 
 def _reconcile_root_close_behavior(text: str) -> Tuple[str, bool]:
-    pattern = re.compile(r'(?m)^on_force_close\s+"(?:\\.|[^"\\])*"\s*$')
+    pattern = re.compile(
+        r'(?m)^(?P<indent>[ \t]*)on_force_close[ \t]+"(?:\\.|[^"\\])*"'
+        r'(?P<suffix>[ \t]*(?://[^\r\n]*)?)$'
+    )
     matches = list(pattern.finditer(text))
     if len(matches) > 1:
         raise InstallError("config contains multiple on_force_close nodes; edit manually")
-    replacement = 'on_force_close "quit"'
     if matches:
-        updated = text[: matches[0].start()] + replacement + text[matches[0].end() :]
+        match = matches[0]
+        replacement = f'{match["indent"]}on_force_close "quit"{match["suffix"]}'
+        updated = text[: match.start()] + replacement + text[match.end() :]
         return updated, updated != text
+    replacement = 'on_force_close "quit"'
     return replacement + "\n\n" + text, True
 
 
@@ -1472,7 +1477,7 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
         return text, False
     binding = (
         '        bind "l" {\n'
-        f'            LaunchOrFocusPlugin "{PLUGIN_ALIAS}" {{\n'
+        f'            LaunchPlugin "{PLUGIN_ALIAS}" {{\n'
         '                floating true\n'
         '                move_to_focused_tab true\n'
         '                configuration { role "session-lock" }\n'

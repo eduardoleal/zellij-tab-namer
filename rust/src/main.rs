@@ -68,11 +68,11 @@ impl ZellijPlugin for TabNamer {
             }
             Event::ModeUpdate(mode) => {
                 if let Some(name) = mode.session_name {
-                    if self.pending_session_name.as_deref() == Some(&name) {
+                    if self.pending_session_name.as_deref() == Some(name.as_str()) {
                         self.pending_session_name = None;
                         self.session_command("mark", &name);
                     }
-                    if self.session_name.as_deref() == Some(&name) {
+                    if self.session_name.as_deref() == Some(name.as_str()) {
                         return self.session_role;
                     }
                     self.session_name = Some(name);
@@ -139,6 +139,9 @@ impl TabNamer {
         };
         let command = adapter.session_lock_command();
         let state_file = adapter.session_lock_state_file();
+        if state_file.trim().is_empty() {
+            return;
+        }
         let context = BTreeMap::from([
             ("session_lock_operation".to_owned(), operation.to_owned()),
             ("session_lock_name".to_owned(), name.to_owned()),
@@ -173,10 +176,17 @@ impl TabNamer {
         let Some(operation) = context.get("session_lock_operation") else {
             return;
         };
+        let Some(name) = context.get("session_lock_name") else {
+            return;
+        };
+        if self.session_name.as_deref() != Some(name.as_str()) {
+            return;
+        }
         if code != Some(0) {
+            let output = if stderr.is_empty() { &stdout } else { &stderr };
             self.session_status = format!(
                 "Session lock command failed: {}",
-                String::from_utf8_lossy(&stderr)
+                String::from_utf8_lossy(output)
             );
             return;
         }

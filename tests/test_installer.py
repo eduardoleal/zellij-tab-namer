@@ -392,6 +392,32 @@ load_plugins {
         self.assertTrue(wired.startswith("keybinds {\n    session {\n"))
         self.assertIn('LaunchPlugin "zellij-tab-namer" {', wired)
 
+    def test_wire_zellij_config_ignores_nested_keybinds_block(self):
+        config = """plugins {
+    other location="file:/tmp/other.wasm" {
+        keybinds {
+        }
+    }
+}
+
+load_plugins {
+}
+"""
+
+        wired, changed = wire_zellij_config(
+            config,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            session_lock_command="/tmp/zellij-tab-namer",
+            session_lock_state_file=Path("/tmp/state.json"),
+        )
+
+        self.assertTrue(changed)
+        self.assertTrue(wired.startswith("keybinds {\n    session {\n"))
+        self.assertEqual(wired.count("keybinds {"), 2)
+        nested_plugin = wired[wired.index('other location=') :]
+        self.assertNotIn('role "session-lock"', nested_plugin)
+
     def test_wire_zellij_config_rejects_multi_key_session_l_binding(self):
         config = 'keybinds {\n    session {\n        bind "l" "Right" { MoveFocus "Right" }\n    }\n}\nplugins {}\nload_plugins {}\n'
 
@@ -767,7 +793,13 @@ load_plugins {
             self.assertIn('on_force_close "quit"', upgraded_config)
             self.assertIn('llm_base_url "http://localhost:11434/v1"', upgraded_config)
             self.assertIn('llm_model "llama3.2"', upgraded_config)
-            self.assertIn('session_lock_command "zellij-tab-namer"', upgraded_config)
+            helper = Path(
+                installer_module.shutil.which("zellij-tab-namer")
+            ).absolute()
+            self.assertIn(
+                f'session_lock_command "{helper}"',
+                upgraded_config,
+            )
             permissions = paths.permissions_file.read_text(encoding="utf-8")
             self.assertIn("ReadApplicationState", permissions)
             self.assertIn("ChangeApplicationState", permissions)
@@ -896,6 +928,67 @@ load_plugins {
             )
             self.assertIn("ChangeApplicationState", permissions)
             self.assertTrue(result.fresh_session_required)
+
+    def test_wasm_install_blocks_when_session_lock_command_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            original_config = "plugins {\n}\n\nload_plugins {\n}\n"
+            paths.zellij_config_file.write_text(original_config, encoding="utf-8")
+            source = write_wasm(Path(tempdir) / "source.wasm")
+
+            with patch("shutil.which", return_value=None):
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        command_name="missing-zellij-tab-namer",
+                        freeze_permissions=False,
+                        paths=paths,
+                    )
+                )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIn(
+                "session lock command is not executable on PATH",
+                "\n".join(result.messages),
+            )
+            self.assertEqual(
+                paths.zellij_config_file.read_text(encoding="utf-8"),
+                original_config,
+            )
+            self.assertFalse((paths.plugins_dir / "zellij-tab-namer.wasm").exists())
+
+    def test_wasm_install_records_absolute_session_lock_command(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = make_paths(tempdir)
+            paths.zellij_config_dir.mkdir(parents=True)
+            paths.zellij_config_file.write_text(
+                "plugins {\n}\n\nload_plugins {\n}\n",
+                encoding="utf-8",
+            )
+            source = write_wasm(Path(tempdir) / "source.wasm")
+            helper = Path(tempdir) / "bin" / "zellij-tab-namer"
+            helper.parent.mkdir()
+            helper.write_text("#!/bin/sh\n", encoding="utf-8")
+            helper.chmod(0o755)
+
+            with patch("shutil.which", return_value=str(helper)):
+                result = install(
+                    InstallOptions(
+                        mode="wasm",
+                        wasm_source=source,
+                        freeze_permissions=False,
+                        paths=paths,
+                    )
+                )
+
+            self.assertEqual(result.status, "complete")
+            config = paths.zellij_config_file.read_text(encoding="utf-8")
+            self.assertIn(
+                f'session_lock_command "{helper.absolute()}"',
+                config,
+            )
 
     def test_rollback_restores_backup_and_dry_run_does_not_mutate(self):
         with tempfile.TemporaryDirectory() as tempdir:

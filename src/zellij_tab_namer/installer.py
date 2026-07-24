@@ -379,8 +379,8 @@ def wire_zellij_config(
     if not _balanced_kdl(config_text):
         raise InstallError("config.kdl appears malformed; refusing to edit it")
 
-    plugins_block = _find_named_block(config_text, "plugins")
-    load_block = _find_named_block(config_text, "load_plugins")
+    plugins_block = _find_named_block(config_text, "plugins", depth=0)
+    load_block = _find_named_block(config_text, "load_plugins", depth=0)
     if plugins_block is None or load_block is None:
         raise InstallError(
             "config.kdl must already contain plugins and load_plugins blocks"
@@ -443,7 +443,7 @@ def wire_zellij_config(
             )
             changed = True
 
-    load_block = _find_named_block(next_text, "load_plugins")
+    load_block = _find_named_block(next_text, "load_plugins", depth=0)
     if load_block is None:
         raise InstallError("load_plugins block disappeared while editing config.kdl")
     load_text = next_text[load_block[0] : load_block[1]]
@@ -701,6 +701,21 @@ def _install_wasm(options: InstallOptions, result: InstallResult) -> None:
             _unlink_missing_ok(downloaded)
 
 
+def _resolve_session_lock_command(command_name: str) -> str:
+    command = command_name.strip()
+    if not command:
+        raise InstallError("session lock command must not be empty")
+    resolved = shutil.which(command)
+    if resolved is None:
+        raise InstallError(
+            f"session lock command is not executable on PATH: {command}"
+        )
+    executable = Path(resolved).absolute()
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise InstallError(f"session lock command is not executable: {executable}")
+    return str(executable)
+
+
 def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
     config_path = options.paths.zellij_config_file
     _refuse_symlink_target(config_path)
@@ -711,6 +726,7 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
     except OSError as exc:
         raise InstallError(f"failed to read config.kdl: {exc}") from exc
 
+    session_lock_command = _resolve_session_lock_command(options.command_name)
     next_config, config_changed = wire_zellij_config(
         config_text,
         target,
@@ -718,7 +734,7 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
         llm_base_url=options.llm_base_url,
         llm_model=options.llm_model,
         no_llm=options.no_llm,
-        session_lock_command=options.command_name,
+        session_lock_command=session_lock_command,
         session_lock_state_file=options.paths.state_file,
     )
 
@@ -1432,14 +1448,20 @@ def _normalize_permissions(grants: Sequence[str]) -> List[str]:
     return normalized
 
 
-def _find_named_block(text: str, name: str) -> Optional[Tuple[int, int]]:
+def _find_named_block(
+    text: str,
+    name: str,
+    depth: Optional[int] = None,
+) -> Optional[Tuple[int, int]]:
     argument = r'(?:"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[^\s{}]+)'
-    matches = list(
-        re.finditer(
+    matches = [
+        match
+        for match in re.finditer(
             rf"(?m)^[ \t]*{re.escape(name)}(?:[ \t]+{argument})*[ \t]*\{{",
             text,
         )
-    )
+        if depth is None or _kdl_brace_depth_at(text, match.start()) == depth
+    ]
     if len(matches) > 1:
         raise InstallError(f"config contains multiple {name} blocks; edit manually")
     if not matches:
@@ -1521,7 +1543,7 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
         '            SwitchToMode "normal"\n'
         '        }\n'
     )
-    keybinds = _find_named_block(text, "keybinds")
+    keybinds = _find_named_block(text, "keybinds", depth=0)
     if keybinds is None:
         keybinds_block = "keybinds {\n    session {\n" + binding + "    }\n}\n\n"
         return keybinds_block + text, True
@@ -1672,7 +1694,7 @@ def _remove_managed_node(alias_text: str, node: str) -> str:
 
 
 def _native_llm_configured(config_text: str) -> bool:
-    plugins_block = _find_named_block(config_text, "plugins")
+    plugins_block = _find_named_block(config_text, "plugins", depth=0)
     if plugins_block is None:
         return False
     alias_block = _find_plugin_alias_block(config_text, plugins_block)

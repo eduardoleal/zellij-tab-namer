@@ -400,13 +400,14 @@ def _run_session_lock(args: argparse.Namespace, stdout: TextIO) -> int:
             if args.operation == "query":
                 result = {"name": name, "locked": bool(locks.get(name))}
             elif args.operation == "mark":
+                changed = not bool(locks.get(name))
                 locks[name] = True
                 _save_state(args.state_file, state)
-                result = {"name": name, "locked": True}
+                result = {"name": name, "locked": True, "changed": changed}
             else:
-                locks.pop(name, None)
+                changed = locks.pop(name, None) is not None
                 _save_state(args.state_file, state)
-                result = {"name": name, "locked": False}
+                result = {"name": name, "locked": False, "changed": changed}
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         stdout.write(json.dumps({"error": str(exc)}) + "\n")
         return 1

@@ -48,13 +48,24 @@ class CLITests(unittest.TestCase):
             with open(state_file, "w", encoding="utf-8") as handle:
                 json.dump({"generated": {"1": "Build"}}, handle)
 
-            for operation, expected in (("mark", True), ("query", True), ("unmark", False)):
+            for operation, expected, changed in (
+                ("mark", True, True),
+                ("query", True, None),
+                ("mark", True, False),
+                ("unmark", False, True),
+                ("unmark", False, False),
+            ):
                 stdout = io.StringIO()
                 self.assertEqual(
                     run(["session-lock", operation, "--state-file", state_file, "platform-review"], stdout=stdout),
                     0,
                 )
-                self.assertEqual(json.loads(stdout.getvalue())["locked"], expected)
+                result = json.loads(stdout.getvalue())
+                self.assertEqual(result["locked"], expected)
+                if changed is None:
+                    self.assertNotIn("changed", result)
+                else:
+                    self.assertEqual(result["changed"], changed)
 
             with open(state_file, encoding="utf-8") as handle:
                 self.assertEqual(json.load(handle)["generated"], {"1": "Build"})

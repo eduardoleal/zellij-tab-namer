@@ -1433,7 +1433,13 @@ def _normalize_permissions(grants: Sequence[str]) -> List[str]:
 
 
 def _find_named_block(text: str, name: str) -> Optional[Tuple[int, int]]:
-    matches = list(re.finditer(rf"(?m)^\s*{re.escape(name)}\s*\{{", text))
+    argument = r'(?:"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[^\s{}]+)'
+    matches = list(
+        re.finditer(
+            rf"(?m)^[ \t]*{re.escape(name)}(?:[ \t]+{argument})*[ \t]*\{{",
+            text,
+        )
+    )
     if len(matches) > 1:
         raise InstallError(f"config contains multiple {name} blocks; edit manually")
     if not matches:
@@ -1469,7 +1475,7 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
         f'            LaunchPlugin "{PLUGIN_ALIAS}" {{\n'
         '                floating true\n'
         '                move_to_focused_tab true\n'
-        '                configuration { role "session-lock" }\n'
+        '                role "session-lock"\n'
         '            }\n'
         '            SwitchToMode "normal"\n'
         '        }\n'

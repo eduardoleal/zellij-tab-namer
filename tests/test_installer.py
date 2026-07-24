@@ -345,7 +345,32 @@ load_plugins {
         self.assertIn("    session {", wired)
         self.assertIn('LaunchPlugin "zellij-tab-namer" {', wired)
         self.assertNotIn("LaunchOrFocusPlugin", wired)
-        self.assertIn('configuration { role "session-lock" }', wired)
+        self.assertIn('                role "session-lock"', wired)
+        self.assertNotIn('configuration { role "session-lock" }', wired)
+
+    def test_wire_zellij_config_updates_attributed_keybinds_block(self):
+        config = """keybinds clear-defaults=true {
+}
+
+plugins {
+}
+
+load_plugins {
+}
+"""
+
+        wired, changed = wire_zellij_config(
+            config,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            session_lock_command="zellij-tab-namer",
+            session_lock_state_file=Path("/tmp/state.json"),
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(wired.count("keybinds"), 1)
+        self.assertIn("keybinds clear-defaults=true {", wired)
+        self.assertIn("    session {", wired)
 
     def test_wire_zellij_config_creates_keybinds_for_session_lock_prompt(self):
         config = """plugins {

@@ -50,6 +50,8 @@ pub struct NativeConfig {
     pub max_chars: usize,
     pub ollama: Option<OllamaConfig>,
     incomplete_llm: bool,
+    session_lock_command: String,
+    session_lock_state_file: String,
 }
 
 impl NativeConfig {
@@ -84,6 +86,14 @@ impl NativeConfig {
             max_chars,
             ollama,
             incomplete_llm,
+            session_lock_command: configuration
+                .get("session_lock_command")
+                .cloned()
+                .unwrap_or_else(|| "zellij-tab-namer".to_owned()),
+            session_lock_state_file: configuration
+                .get("session_lock_state_file")
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }
@@ -117,6 +127,14 @@ impl Adapter {
 
     pub fn max_chars(&self) -> usize {
         self.config.max_chars
+    }
+
+    pub fn session_lock_command(&self) -> String {
+        self.config.session_lock_command.clone()
+    }
+
+    pub fn session_lock_state_file(&self) -> String {
+        self.config.session_lock_state_file.clone()
     }
 
     pub fn load_actions(&self) -> Vec<Action> {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -49,6 +50,9 @@ def run(
 
     if args.command == "rollback":
         return _run_rollback(args, out, err)
+
+    if args.command == "session-lock":
+        return _run_session_lock(args, out)
 
     if args.command == "watch":
         while True:
@@ -104,6 +108,9 @@ def _run_once(
         compressor=compressor,
         force=args.force,
     )
+    session_locks = state.get("session_locks")
+    if isinstance(session_locks, dict):
+        next_state["session_locks"] = dict(session_locks)
 
     applied = 0
     for decision in decisions:
@@ -146,7 +153,9 @@ def _run_once(
 
     if applied:
         try:
-            _save_state(args.state_file, next_state)
+            with _locked_state(args.state_file) as latest_state:
+                latest_state["generated"] = next_state["generated"]
+                _save_state(args.state_file, latest_state)
         except OSError as exc:
             stderr.write(f"failed to write state file: {exc}\n")
             return 1
@@ -245,6 +254,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print rollback actions without mutating files",
     )
     _add_install_path_options(rollback_parser)
+
+    session_lock = subparsers.add_parser(
+        "session-lock", help="query or update durable session lock state"
+    )
+    session_lock.add_argument("operation", choices=("query", "mark", "unmark", "cleanup"))
+    session_lock.add_argument("--state-file", default=_default_state_file())
+    session_lock.add_argument("name")
 
     return parser
 
@@ -371,6 +387,69 @@ def _run_rollback(
     return _emit_result(result, stdout, stderr)
 
 
+def _run_session_lock(args: argparse.Namespace, stdout: TextIO) -> int:
+    name = args.name
+    if not _valid_session_name(name):
+        stdout.write(json.dumps({"error": "invalid session name"}) + "\n")
+        return 2
+    try:
+        with _locked_state(args.state_file, require_object=True) as state:
+            locks = state.setdefault("session_locks", {})
+            if not isinstance(locks, dict):
+                raise ValueError("state session_locks must contain a JSON object")
+            if args.operation == "query":
+                result = {"name": name, "locked": bool(locks.get(name))}
+            elif args.operation == "mark":
+                changed = not bool(locks.get(name))
+                locks[name] = True
+                _save_state(args.state_file, state)
+                result = {"name": name, "locked": True, "changed": changed}
+            else:
+                changed = locks.pop(name, None) is not None
+                _save_state(args.state_file, state)
+                result = {"name": name, "locked": False, "changed": changed}
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        stdout.write(json.dumps({"error": str(exc)}) + "\n")
+        return 1
+    stdout.write(json.dumps(result, sort_keys=True) + "\n")
+    return 0
+
+
+def _valid_session_name(name: str) -> bool:
+    return bool(name) and len(name) <= 64 and all(
+        character.isalnum() or character in " ._-" for character in name
+    )
+
+
+class _locked_state:
+    def __init__(self, state_file: str, require_object: bool = False) -> None:
+        self.state_file = state_file
+        self.require_object = require_object
+        self.handle: Optional[TextIO] = None
+
+    def __enter__(self) -> Dict[str, Any]:
+        directory = os.path.dirname(self.state_file)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self.handle = open(f"{self.state_file}.lock", "a+", encoding="utf-8")
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        try:
+            return _load_state(
+                self.state_file,
+                require_object=self.require_object,
+            )
+        except Exception:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+            self.handle = None
+            raise
+
+    def __exit__(self, *_: object) -> None:
+        if self.handle is not None:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+
+
 def _emit_result(
     result: InstallResult,
     stdout: TextIO,
@@ -446,16 +525,20 @@ def _path_arg(
     return path.parent.resolve(strict=False) / path.name
 
 
-def _load_state(path: str) -> Dict[str, Any]:
+def _load_state(path: str, require_object: bool = False) -> Dict[str, Any]:
     try:
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
     except FileNotFoundError:
         return {"generated": {}}
     if not isinstance(data, dict):
+        if require_object:
+            raise ValueError("state file must contain a JSON object")
         return {"generated": {}}
     generated = data.get("generated")
     if not isinstance(generated, dict):
+        if require_object and generated is not None:
+            raise ValueError("state generated must contain a JSON object")
         data["generated"] = {}
     return data
 

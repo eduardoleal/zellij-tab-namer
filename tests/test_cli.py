@@ -42,6 +42,73 @@ class FakeRunner:
 
 
 class CLITests(unittest.TestCase):
+    def test_session_lock_mark_query_and_unmark_preserve_generated_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_file = os.path.join(tempdir, "state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                json.dump({"generated": {"1": "Build"}}, handle)
+
+            for operation, expected, changed in (
+                ("mark", True, True),
+                ("query", True, None),
+                ("mark", True, False),
+                ("unmark", False, True),
+                ("unmark", False, False),
+            ):
+                stdout = io.StringIO()
+                self.assertEqual(
+                    run(["session-lock", operation, "--state-file", state_file, "platform-review"], stdout=stdout),
+                    0,
+                )
+                result = json.loads(stdout.getvalue())
+                self.assertEqual(result["locked"], expected)
+                if changed is None:
+                    self.assertNotIn("changed", result)
+                else:
+                    self.assertEqual(result["changed"], changed)
+
+            with open(state_file, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["generated"], {"1": "Build"})
+
+    def test_session_lock_rejects_unsafe_name_without_writing(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_file = os.path.join(tempdir, "state.json")
+            stdout = io.StringIO()
+            self.assertEqual(
+                run(["session-lock", "mark", "--state-file", state_file, "bad\nname"], stdout=stdout),
+                2,
+            )
+            self.assertEqual(json.loads(stdout.getvalue()), {"error": "invalid session name"})
+            self.assertFalse(os.path.exists(state_file))
+
+    def test_session_lock_refuses_malformed_state_without_overwriting_it(self):
+        malformed_states = ("[]", '{"generated": []}', '{"session_locks": []}')
+        for original in malformed_states:
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as tempdir:
+                state_file = os.path.join(tempdir, "state.json")
+                with open(state_file, "w", encoding="utf-8") as handle:
+                    handle.write(original)
+                stdout = io.StringIO()
+                self.assertEqual(
+                    run(
+                        [
+                            "session-lock",
+                            "mark",
+                            "--state-file",
+                            state_file,
+                            "work",
+                        ],
+                        stdout=stdout,
+                    ),
+                    1,
+                )
+                self.assertIn(
+                    "must contain a JSON object",
+                    json.loads(stdout.getvalue())["error"],
+                )
+                with open(state_file, encoding="utf-8") as handle:
+                    self.assertEqual(handle.read(), original)
+
     def test_install_propagates_native_llm_tri_state_and_dry_run(self):
         cases = (
             ([], None, None, None),
@@ -181,6 +248,16 @@ class CLITests(unittest.TestCase):
                 state["generated"]["1"], "Implement B3 slice 4 specifications"
             )
             self.assertIn("renamed tab 1", stdout.getvalue())
+
+    def test_once_preserves_session_locks_when_saving_generated_state(self):
+        runner = FakeRunner(panes=[{"tab_id": 1, "tab_name": "Tab #1", "title": "Build", "pane_command": "fish", "pane_cwd": "/tmp", "is_focused": True, "is_floating": False}])
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_file = os.path.join(tempdir, "state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                json.dump({"generated": {}, "session_locks": {"platform": True}}, handle)
+            self.assertEqual(run(["once", "--state-file", state_file], command_runner=runner, stdout=io.StringIO(), stderr=io.StringIO()), 0)
+            with open(state_file, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["session_locks"], {"platform": True})
 
     def test_invalid_json_returns_failure(self):
         runner = FakeRunner(list_result=completed(stdout="{not-json"))

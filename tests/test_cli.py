@@ -70,6 +70,34 @@ class CLITests(unittest.TestCase):
             self.assertEqual(json.loads(stdout.getvalue()), {"error": "invalid session name"})
             self.assertFalse(os.path.exists(state_file))
 
+    def test_session_lock_refuses_malformed_state_without_overwriting_it(self):
+        malformed_states = ("[]", '{"generated": []}', '{"session_locks": []}')
+        for original in malformed_states:
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as tempdir:
+                state_file = os.path.join(tempdir, "state.json")
+                with open(state_file, "w", encoding="utf-8") as handle:
+                    handle.write(original)
+                stdout = io.StringIO()
+                self.assertEqual(
+                    run(
+                        [
+                            "session-lock",
+                            "mark",
+                            "--state-file",
+                            state_file,
+                            "work",
+                        ],
+                        stdout=stdout,
+                    ),
+                    1,
+                )
+                self.assertIn(
+                    "must contain a JSON object",
+                    json.loads(stdout.getvalue())["error"],
+                )
+                with open(state_file, encoding="utf-8") as handle:
+                    self.assertEqual(handle.read(), original)
+
     def test_install_propagates_native_llm_tri_state_and_dry_run(self):
         cases = (
             ([], None, None, None),

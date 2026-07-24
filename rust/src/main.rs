@@ -72,7 +72,11 @@ impl ZellijPlugin for TabNamer {
                     if self.pending_session_name.as_deref() == Some(name.as_str()) {
                         self.pending_session_name = None;
                         self.session_name = Some(name.clone());
-                        self.session_command("mark", &name);
+                        self.session_locked = Some(true);
+                        self.session_status = "Locked — detaches on terminal close".to_owned();
+                        if self.session_role {
+                            close_focus();
+                        }
                         return self.session_role;
                     }
                     if self.session_name.as_deref() == Some(name.as_str()) {
@@ -196,7 +200,9 @@ impl TabNamer {
         if generation != self.session_command_generation {
             return;
         }
-        if self.session_name.as_deref() != Some(name.as_str()) {
+        let pending_mark =
+            operation == "mark" && self.pending_session_name.as_deref() == Some(name.as_str());
+        if self.session_name.as_deref() != Some(name.as_str()) && !pending_mark {
             return;
         }
         if code != Some(0) {
@@ -220,6 +226,11 @@ impl TabNamer {
             "query" => reconfigure("on_force_close \"quit\"".to_owned(), false),
             "mark" if locked => {
                 reconfigure("on_force_close \"detach\"".to_owned(), false);
+                if pending_mark && self.session_name.as_deref() != Some(name.as_str()) {
+                    rename_session(name);
+                    self.session_status = "Renaming session…".to_owned();
+                    return;
+                }
                 self.session_status = "Locked — detaches on terminal close".to_owned();
                 if self.session_role {
                     close_focus();
@@ -262,9 +273,9 @@ impl TabNamer {
                         self.session_command("mark", &self.session_input.clone());
                         self.session_status = "Locking session…".to_owned();
                     } else {
-                        rename_session(&self.session_input);
                         self.pending_session_name = Some(self.session_input.clone());
-                        self.session_status = "Renaming session…".to_owned();
+                        self.session_command("mark", &self.session_input.clone());
+                        self.session_status = "Locking session…".to_owned();
                     }
                 } else {
                     self.session_status = "Use 1–64 letters, digits, spaces, ., _, or -".to_owned();

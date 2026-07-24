@@ -406,6 +406,42 @@ load_plugins {
             wire_zellij_config(config, Path("/tmp/plugin.wasm"), 24,
                 session_lock_command="zellij-tab-namer", session_lock_state_file=Path("/tmp/state.json"))
 
+    def test_wire_zellij_config_rejects_unmanaged_l_binding_with_alias_text(self):
+        configs = (
+            """keybinds {
+    session {
+        bind "l" { Run "zellij-tab-namer" }
+    }
+}
+plugins {}
+load_plugins {}
+""",
+            """keybinds {
+    session {
+        bind "l" {
+            LaunchPlugin "zellij-tab-namer" {
+                role "tab-namer"
+            }
+        }
+    }
+}
+plugins {}
+load_plugins {}
+""",
+        )
+        for config in configs:
+            with self.subTest(config=config), self.assertRaisesRegex(
+                InstallError,
+                "already binds l",
+            ):
+                wire_zellij_config(
+                    config,
+                    Path("/tmp/plugin.wasm"),
+                    24,
+                    session_lock_command="zellij-tab-namer",
+                    session_lock_state_file=Path("/tmp/state.json"),
+                )
+
     def test_wire_zellij_config_preserves_indented_close_comment_and_newline(self):
         config = """    on_force_close "detach" // preserve this comment
 plugins {

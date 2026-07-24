@@ -1506,7 +1506,25 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
         if close_brace is None:
             raise InstallError("session l binding is not balanced")
         existing_binding = block[binding_match.start() : close_brace + 1]
-        if PLUGIN_ALIAS not in existing_binding:
+        launch_match = re.search(
+            rf'(?m)^\s*LaunchPlugin\s+"{re.escape(PLUGIN_ALIAS)}"\s*\{{',
+            existing_binding,
+        )
+        if launch_match is None:
+            raise InstallError("session mode already binds l; refusing to replace it")
+        launch_open = existing_binding.find(
+            "{",
+            launch_match.start(),
+            launch_match.end(),
+        )
+        launch_close = _matching_brace(existing_binding, launch_open)
+        if launch_close is None:
+            raise InstallError("session lock plugin binding is not balanced")
+        launch_block = existing_binding[launch_match.start() : launch_close + 1]
+        if not re.search(
+            r'(?m)^\s*role\s+"session-lock"\s*$',
+            launch_block,
+        ):
             raise InstallError("session mode already binds l; refusing to replace it")
         return text, False
     return _insert_before_block_close(text, session, binding), True

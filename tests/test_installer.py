@@ -399,6 +399,13 @@ load_plugins {
             wire_zellij_config(config, Path("/tmp/plugin.wasm"), 24,
                 session_lock_command="zellij-tab-namer", session_lock_state_file=Path("/tmp/state.json"))
 
+    def test_wire_zellij_config_rejects_l_binding_after_other_session_binding(self):
+        config = 'keybinds {\n    session {\n        bind "x" { MoveFocus "Left" }\n        bind "l" { MoveFocus "Right" }\n    }\n}\nplugins {}\nload_plugins {}\n'
+
+        with self.assertRaisesRegex(InstallError, "already binds l"):
+            wire_zellij_config(config, Path("/tmp/plugin.wasm"), 24,
+                session_lock_command="zellij-tab-namer", session_lock_state_file=Path("/tmp/state.json"))
+
     def test_wire_zellij_config_preserves_indented_close_comment_and_newline(self):
         config = """    on_force_close "detach" // preserve this comment
 plugins {

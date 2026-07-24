@@ -373,6 +373,8 @@ def wire_zellij_config(
     llm_base_url: Optional[str] = None,
     llm_model: Optional[str] = None,
     no_llm: Optional[bool] = None,
+    session_lock_command: Optional[str] = None,
+    session_lock_state_file: Optional[Path] = None,
 ) -> Tuple[str, bool]:
     if not _balanced_kdl(config_text):
         raise InstallError("config.kdl appears malformed; refusing to edit it")
@@ -394,8 +396,14 @@ def wire_zellij_config(
     alias_entry = (
         f"    {PLUGIN_ALIAS} location={_kdl_string(plugin_url)} {{\n"
         f"        max_chars {max_chars}\n"
-        f"{llm_lines}"
-        "    }\n"
+        + (
+            f"        session_lock_command {_kdl_string(session_lock_command)}\n"
+            f"        session_lock_state_file {_kdl_string(str(session_lock_state_file))}\n"
+            if session_lock_command and session_lock_state_file
+            else ""
+        )
+        + f"{llm_lines}"
+        + "    }\n"
     )
     changed = False
     next_text = config_text
@@ -408,6 +416,15 @@ def wire_zellij_config(
         alias_text = next_text[alias_block[0] : alias_block[1]]
         alias_text = _reconcile_alias_location(alias_text, plugin_url)
         alias_text = _reconcile_managed_node(alias_text, "max_chars", str(max_chars))
+        if session_lock_command and session_lock_state_file:
+            alias_text = _reconcile_managed_node(
+                alias_text, "session_lock_command", _kdl_string(session_lock_command)
+            )
+            alias_text = _reconcile_managed_node(
+                alias_text,
+                "session_lock_state_file",
+                _kdl_string(str(session_lock_state_file)),
+            )
         if no_llm:
             alias_text = _remove_managed_node(alias_text, "llm_base_url")
             alias_text = _remove_managed_node(alias_text, "llm_model")
@@ -437,6 +454,12 @@ def wire_zellij_config(
             f"    {PLUGIN_ALIAS}\n",
         )
         changed = True
+
+    if session_lock_command and session_lock_state_file:
+        next_text, close_changed = _reconcile_root_close_behavior(next_text)
+        changed = changed or close_changed
+        next_text, binding_changed = _reconcile_session_lock_binding(next_text)
+        changed = changed or binding_changed
 
     return next_text, changed
 
@@ -695,6 +718,8 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
         llm_base_url=options.llm_base_url,
         llm_model=options.llm_model,
         no_llm=options.no_llm,
+        session_lock_command=options.command_name,
+        session_lock_state_file=options.paths.state_file,
     )
 
     permissions_path = options.paths.permissions_file
@@ -707,7 +732,13 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
         original_permissions = None
     except OSError as exc:
         raise InstallError(f"failed to read permissions.kdl: {exc}") from exc
-    effective_grants = ["ReadApplicationState", "ChangeApplicationState"]
+    effective_grants = [
+        "ReadApplicationState",
+        "ChangeApplicationState",
+        "RunCommands",
+        "Reconfigure",
+        "OpenTerminalsOrPlugins",
+    ]
     effective_grants.extend(options.wasm_permissions)
     if not options.no_llm and _native_llm_configured(next_config):
         effective_grants.append("WebAccess")
@@ -1413,6 +1444,43 @@ def _find_named_block(text: str, name: str) -> Optional[Tuple[int, int]]:
     if close_brace is None:
         raise InstallError(f"{name} block is not balanced")
     return start, close_brace + 1
+
+
+def _reconcile_root_close_behavior(text: str) -> Tuple[str, bool]:
+    pattern = re.compile(r'(?m)^on_force_close\s+"(?:\\.|[^"\\])*"\s*$')
+    matches = list(pattern.finditer(text))
+    if len(matches) > 1:
+        raise InstallError("config contains multiple on_force_close nodes; edit manually")
+    replacement = 'on_force_close "quit"'
+    if matches:
+        updated = text[: matches[0].start()] + replacement + text[matches[0].end() :]
+        return updated, updated != text
+    return replacement + "\n\n" + text, True
+
+
+def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
+    session = _find_named_block(text, "session")
+    if session is None:
+        # Minimal Zellij configurations may intentionally omit custom modes.
+        # Keep the existing installer compatible; users can add the binding
+        # through their normal keybind configuration when they enable it.
+        return text, False
+    block = text[session[0] : session[1]]
+    if re.search(r'(?m)^\s*bind\s+"l"\s*\{', block):
+        if PLUGIN_ALIAS not in block:
+            raise InstallError("session mode already binds l; refusing to replace it")
+        return text, False
+    binding = (
+        '        bind "l" {\n'
+        f'            LaunchOrFocusPlugin "{PLUGIN_ALIAS}" {{\n'
+        '                floating true\n'
+        '                move_to_focused_tab true\n'
+        '                configuration { role "session-lock" }\n'
+        '            }\n'
+        '            SwitchToMode "normal"\n'
+        '        }\n'
+    )
+    return _insert_before_block_close(text, session, binding), True
 
 
 def _find_plugin_alias_block(

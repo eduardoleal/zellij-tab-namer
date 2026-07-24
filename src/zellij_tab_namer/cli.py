@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -49,6 +50,9 @@ def run(
 
     if args.command == "rollback":
         return _run_rollback(args, out, err)
+
+    if args.command == "session-lock":
+        return _run_session_lock(args, out)
 
     if args.command == "watch":
         while True:
@@ -246,6 +250,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_install_path_options(rollback_parser)
 
+    session_lock = subparsers.add_parser(
+        "session-lock", help="query or update durable session lock state"
+    )
+    session_lock.add_argument("operation", choices=("query", "mark", "unmark", "cleanup"))
+    session_lock.add_argument("--state-file", default=_default_state_file())
+    session_lock.add_argument("name")
+
     return parser
 
 
@@ -369,6 +380,58 @@ def _run_rollback(
         return 1
 
     return _emit_result(result, stdout, stderr)
+
+
+def _run_session_lock(args: argparse.Namespace, stdout: TextIO) -> int:
+    name = args.name
+    if not _valid_session_name(name):
+        stdout.write(json.dumps({"error": "invalid session name"}) + "\n")
+        return 2
+    try:
+        with _locked_state(args.state_file) as state:
+            locks = state.setdefault("session_locks", {})
+            if not isinstance(locks, dict):
+                locks = state["session_locks"] = {}
+            if args.operation == "query":
+                result = {"name": name, "locked": bool(locks.get(name))}
+            elif args.operation == "mark":
+                locks[name] = True
+                _save_state(args.state_file, state)
+                result = {"name": name, "locked": True}
+            else:
+                locks.pop(name, None)
+                _save_state(args.state_file, state)
+                result = {"name": name, "locked": False}
+    except (OSError, json.JSONDecodeError) as exc:
+        stdout.write(json.dumps({"error": str(exc)}) + "\n")
+        return 1
+    stdout.write(json.dumps(result, sort_keys=True) + "\n")
+    return 0
+
+
+def _valid_session_name(name: str) -> bool:
+    return bool(name) and len(name) <= 64 and all(
+        character.isalnum() or character in " ._-" for character in name
+    )
+
+
+class _locked_state:
+    def __init__(self, state_file: str) -> None:
+        self.state_file = state_file
+        self.handle: Optional[TextIO] = None
+
+    def __enter__(self) -> Dict[str, Any]:
+        directory = os.path.dirname(self.state_file)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self.handle = open(f"{self.state_file}.lock", "a+", encoding="utf-8")
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        return _load_state(self.state_file)
+
+    def __exit__(self, *_: object) -> None:
+        if self.handle is not None:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
 
 
 def _emit_result(

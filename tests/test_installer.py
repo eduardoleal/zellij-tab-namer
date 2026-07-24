@@ -600,10 +600,11 @@ load_plugins {
             )
 
             self.assertEqual(result.status, "complete")
-            self.assertEqual(
-                paths.zellij_config_file.read_text(encoding="utf-8"),
-                original_config,
-            )
+            upgraded_config = paths.zellij_config_file.read_text(encoding="utf-8")
+            self.assertIn('on_force_close "quit"', upgraded_config)
+            self.assertIn('llm_base_url "http://localhost:11434/v1"', upgraded_config)
+            self.assertIn('llm_model "llama3.2"', upgraded_config)
+            self.assertIn('session_lock_command "zellij-tab-namer"', upgraded_config)
             permissions = paths.permissions_file.read_text(encoding="utf-8")
             self.assertIn("ReadApplicationState", permissions)
             self.assertIn("ChangeApplicationState", permissions)

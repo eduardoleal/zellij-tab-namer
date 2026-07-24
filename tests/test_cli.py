@@ -42,6 +42,34 @@ class FakeRunner:
 
 
 class CLITests(unittest.TestCase):
+    def test_session_lock_mark_query_and_unmark_preserve_generated_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_file = os.path.join(tempdir, "state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                json.dump({"generated": {"1": "Build"}}, handle)
+
+            for operation, expected in (("mark", True), ("query", True), ("unmark", False)):
+                stdout = io.StringIO()
+                self.assertEqual(
+                    run(["session-lock", operation, "--state-file", state_file, "platform-review"], stdout=stdout),
+                    0,
+                )
+                self.assertEqual(json.loads(stdout.getvalue())["locked"], expected)
+
+            with open(state_file, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["generated"], {"1": "Build"})
+
+    def test_session_lock_rejects_unsafe_name_without_writing(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_file = os.path.join(tempdir, "state.json")
+            stdout = io.StringIO()
+            self.assertEqual(
+                run(["session-lock", "mark", "--state-file", state_file, "bad\nname"], stdout=stdout),
+                2,
+            )
+            self.assertEqual(json.loads(stdout.getvalue()), {"error": "invalid session name"})
+            self.assertFalse(os.path.exists(state_file))
+
     def test_install_propagates_native_llm_tri_state_and_dry_run(self):
         cases = (
             ([], None, None, None),

@@ -317,8 +317,8 @@ build uploads a workflow artifact named `zellij-tab-namer-wasm` containing:
 - `zellij-tab-namer.wasm`
 - `zellij-tab-namer.wasm.sha256`
 
-Publishing is separate from preparing v0.2.0. The workflow publishes a GitHub
-Release only for a pushed `v<version>` tag matching the Cargo package version,
-and it refuses to replace an existing release's immutable assets. This work
-does not create or push `v0.2.0`; release publication requires an explicit
-follow-up action.
+Release Please runs after every push to `main`. Conventional Commits produce a
+release PR that updates `Cargo.toml`, `pyproject.toml`, and `CHANGELOG.md`.
+Merging that PR creates the matching `v<version>` tag and GitHub Release; the
+tag workflow then attaches the verified WASM and checksum. Existing WASM assets
+are never replaced.

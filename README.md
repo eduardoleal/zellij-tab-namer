@@ -151,6 +151,32 @@ by stable ID. It never reads pane contents or scrollback. It applies a
 deterministic shortened label immediately; when native Ollama is enabled, a
 valid current model result may refine that label asynchronously.
 
+### Session lock and ephemeral sessions
+
+The native installation also manages session persistence:
+
+- New and unlocked sessions are ephemeral. They quit after their last client
+  leaves, including terminal close, explicit detach, and switching through the
+  session manager.
+- Press `Ctrl o`, then `l` to name and lock the current session. Locked sessions
+  remain available to attach after their last client leaves.
+- Press `Ctrl o`, then `l` again to unlock a locked session. Its descriptive
+  name stays, but it becomes ephemeral.
+- Press `Ctrl o`, then `w` to open the session manager. An unlocked session
+  shows a warning before the manager opens; Enter continues and Esc cancels.
+  Locked sessions open the manager directly.
+
+The installer uses `on_force_close "detach"` as a safe baseline because Zellij
+captures that option when a client attaches. The headless plugin subscribes to
+session updates and quits only after it has observed an attached, confirmed
+unlocked session reach zero clients. If lock state cannot be confirmed, the
+session is preserved rather than risking data loss.
+
+After installing an update that changes session close behavior, detach and
+reattach sessions that were already running (or start fresh sessions) before
+relying on lock persistence. Existing clients keep the `on_force_close` value
+they captured when they attached.
+
 A model failure, rejected result, denied permission, stopped server, or two
 hung requests leaves deterministic naming active. Only one nonempty output line
 within `max_chars` is accepted. Late, stale, cross-tab, and closed-tab results
@@ -174,9 +200,9 @@ zellij-tab-namer install --mode wasm \
   --no-llm
 ```
 
-Without complete native LLM configuration, the plugin requests only
-`ReadApplicationState` and `ChangeApplicationState`, makes no web request, and
-uses deterministic naming.
+Without complete native LLM configuration, the plugin requests
+`ReadApplicationState`, `ChangeApplicationState`, `RunCommands`, and
+`OpenTerminalsOrPlugins`, makes no web request, and uses deterministic naming.
 
 ### Enable local Ollama refinement
 

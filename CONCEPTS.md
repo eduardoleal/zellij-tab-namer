@@ -19,7 +19,10 @@ The immutable, versioned publication of a verified Workflow artifact, created on
 ## Session persistence
 
 ### Session lock
-An explicit per-session mark that makes the session detach rather than quit when its terminal closes. Locking requires the user to provide a deliberate session name; a name alone does not imply a lock.
+An explicit per-session mark that lets a session remain running after its last client leaves. Locking requires the user to provide a deliberate session name; a name alone does not imply a lock.
 
 ### Unlocked session
-A disposable session that quits when its terminal closes. It may retain a descriptive name after being unlocked.
+A disposable, ephemeral session that quits after its last client leaves through terminal close, explicit detach, or session switching. It may retain a descriptive name after being unlocked.
+
+### Session switch guard
+The interactive warning shown before the session manager opens from an unlocked session. It reminds the user that switching will leave the session clientless and cause the ephemeral lifecycle to quit it.

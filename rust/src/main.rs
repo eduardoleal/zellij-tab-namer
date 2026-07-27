@@ -4,10 +4,37 @@ use zellij_tab_namer_plugin::adapter::{Action, Adapter};
 use zellij_tab_namer_plugin::naming::{
     canonical_source_for_pane, choose_pane, label_for_pane, PaneSnapshot,
 };
+use zellij_tab_namer_plugin::session::{
+    switch_guard_action, switch_guard_enter_opens_manager, timer_matches, EphemeralLifecycle,
+    LifecycleAction, SwitchGuardAction,
+};
 use zellij_tile::prelude::*;
 
 const DEBOUNCE_SECONDS: f64 = 0.35;
+const EPHEMERAL_QUIT_CHECK_SECONDS: f64 = 0.5;
 const SESSION_RENAME_TIMEOUT_SECONDS: f64 = 3.0;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SessionRole {
+    #[default]
+    Headless,
+    Lock,
+    SwitchGuard,
+}
+
+impl SessionRole {
+    fn from_configuration(configuration: &BTreeMap<String, String>) -> Self {
+        match configuration.get("role").map(String::as_str) {
+            Some("session-lock") => Self::Lock,
+            Some("session-switch-guard") => Self::SwitchGuard,
+            _ => Self::Headless,
+        }
+    }
+
+    fn is_interactive(self) -> bool {
+        self != Self::Headless
+    }
+}
 
 #[derive(Default)]
 struct TabNamer {
@@ -15,10 +42,11 @@ struct TabNamer {
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
     update_pending: bool,
-    session_role: bool,
+    session_role: SessionRole,
     session_name: Option<String>,
     session_input: String,
     session_locked: Option<bool>,
+    ephemeral_lifecycle: EphemeralLifecycle,
     session_command_generation: u64,
     session_status: String,
     pending_session_name: Option<String>,
@@ -32,9 +60,7 @@ register_plugin!(TabNamer);
 
 impl ZellijPlugin for TabNamer {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        self.session_role = configuration
-            .get("role")
-            .is_some_and(|role| role == "session-lock");
+        self.session_role = SessionRole::from_configuration(&configuration);
         let adapter = Adapter::new(configuration);
         self.execute(adapter.load_actions());
         self.adapter = Some(adapter);
@@ -43,32 +69,45 @@ impl ZellijPlugin for TabNamer {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::TabUpdate(tabs) => {
-                if self.session_role {
+                if self.is_interactive_role() {
                     return false;
                 }
                 self.tabs = tabs;
                 self.schedule_update();
             }
             Event::PaneUpdate(panes) => {
-                if self.session_role {
+                if self.is_interactive_role() {
                     return false;
                 }
                 self.panes = panes;
                 self.schedule_update();
             }
-            Event::CwdChanged(..) | Event::CommandChanged(..) if !self.session_role => {
+            Event::CwdChanged(..) | Event::CommandChanged(..) if !self.is_interactive_role() => {
                 self.schedule_update()
             }
-            Event::Timer(_) => {
-                if self.session_role {
-                    if self.pending_session_name.is_some() {
+            Event::Timer(seconds) => {
+                if self.session_role == SessionRole::Lock {
+                    if timer_matches(seconds, SESSION_RENAME_TIMEOUT_SECONDS)
+                        && self.pending_session_name.is_some()
+                    {
                         self.rollback_pending_rename(false);
                         return true;
                     }
                     return false;
                 }
-                self.update_pending = false;
-                self.reconcile_tabs();
+                if self.session_role == SessionRole::SwitchGuard {
+                    return true;
+                }
+                if timer_matches(seconds, EPHEMERAL_QUIT_CHECK_SECONDS) {
+                    let lifecycle_action =
+                        self.ephemeral_lifecycle.confirm_quit(self.session_locked);
+                    self.handle_lifecycle_action(lifecycle_action);
+                    return lifecycle_action != LifecycleAction::Quit;
+                }
+                if timer_matches(seconds, DEBOUNCE_SECONDS) && self.update_pending {
+                    self.update_pending = false;
+                    self.reconcile_tabs();
+                }
             }
             Event::PermissionRequestResult(status) => {
                 if let Some(adapter) = &mut self.adapter {
@@ -76,25 +115,42 @@ impl ZellijPlugin for TabNamer {
                 }
                 self.schedule_update();
             }
+            Event::SessionUpdate(sessions, _) if !self.is_interactive_role() => {
+                let current_session = self
+                    .session_name
+                    .as_deref()
+                    .and_then(|name| sessions.iter().find(|session| session.name == name))
+                    .or_else(|| sessions.iter().find(|session| session.is_current_session));
+                if let Some(current_session) = current_session {
+                    if self.session_name.is_none() {
+                        self.session_name = Some(current_session.name.clone());
+                        self.query_session_lock();
+                    }
+                    let lifecycle_action = self
+                        .ephemeral_lifecycle
+                        .observe_clients(current_session.connected_clients);
+                    self.handle_lifecycle_action(lifecycle_action);
+                }
+            }
             Event::ModeUpdate(mode) => {
                 if let Some(name) = mode.session_name {
                     if self.pending_session_name.as_deref() == Some(name.as_str()) {
                         if self.rename_rollback_pending {
                             self.session_name = Some(name);
-                            return self.session_role;
+                            return self.is_interactive_role();
                         }
                         self.pending_session_name = None;
                         self.session_name = Some(name.clone());
                         self.session_locked = Some(true);
-                        reconfigure("on_force_close \"detach\"".to_owned(), false);
-                        self.session_status = "Locked — detaches on terminal close".to_owned();
-                        if self.session_role {
+                        self.session_status =
+                            "Locked — persists when detached or switched".to_owned();
+                        if self.session_role == SessionRole::Lock {
                             close_focus();
                         }
-                        return self.session_role;
+                        return self.is_interactive_role();
                     }
                     if self.session_name.as_deref() == Some(name.as_str()) {
-                        return self.session_role;
+                        return self.is_interactive_role();
                     }
                     self.session_name = Some(name);
                     self.query_session_lock();
@@ -102,10 +158,10 @@ impl ZellijPlugin for TabNamer {
             }
             Event::RunCommandResult(code, stdout, stderr, context) => {
                 self.handle_session_command(code, stdout, stderr, context);
-                return self.session_role;
+                return self.is_interactive_role();
             }
-            Event::Key(key) if self.session_role => return self.handle_session_key(key),
-            Event::PastedText(text) if self.session_role => {
+            Event::Key(key) if self.is_interactive_role() => return self.handle_session_key(key),
+            Event::PastedText(text) if self.session_role == SessionRole::Lock => {
                 self.session_input.push_str(&text);
                 return true;
             }
@@ -124,11 +180,29 @@ impl ZellijPlugin for TabNamer {
             }
             _ => {}
         }
-        self.session_role
+        self.is_interactive_role()
     }
 
     fn render(&mut self, _rows: usize, _cols: usize) {
-        if !self.session_role {
+        if self.session_role == SessionRole::SwitchGuard {
+            match switch_guard_action(self.session_locked) {
+                SwitchGuardAction::Warn => println!(
+                    "This session is unlocked and will quit when you switch.\n\n\
+                     Enter to open the session manager · Esc to cancel\n{}",
+                    self.session_status
+                ),
+                SwitchGuardAction::Wait => {
+                    println!(
+                        "Checking session lock state…\n\n\
+                         Enter to open the session manager · Esc to cancel\n{}",
+                        self.session_status
+                    )
+                }
+                SwitchGuardAction::OpenSessionManager => {}
+            }
+            return;
+        }
+        if self.session_role != SessionRole::Lock {
             return;
         }
         if let Some(name) = &self.pending_session_name {
@@ -151,6 +225,51 @@ impl ZellijPlugin for TabNamer {
 }
 
 impl TabNamer {
+    fn is_interactive_role(&self) -> bool {
+        self.session_role.is_interactive()
+    }
+
+    fn handle_lifecycle_action(&mut self, action: LifecycleAction) {
+        match action {
+            LifecycleAction::None => {}
+            LifecycleAction::RefreshLockAndScheduleQuitCheck => {
+                self.session_locked = None;
+                self.query_session_lock();
+                set_timeout(EPHEMERAL_QUIT_CHECK_SECONDS);
+            }
+            LifecycleAction::ScheduleQuitCheck => {
+                set_timeout(EPHEMERAL_QUIT_CHECK_SECONDS);
+            }
+            LifecycleAction::Quit => quit_zellij(),
+        }
+    }
+
+    fn set_confirmed_lock_state(&mut self, locked: bool) {
+        self.session_locked = Some(locked);
+        let lifecycle_action = self
+            .ephemeral_lifecycle
+            .lock_state_changed(self.session_locked);
+        self.handle_lifecycle_action(lifecycle_action);
+        if self.session_role == SessionRole::SwitchGuard {
+            if locked {
+                self.open_session_manager();
+            } else {
+                self.session_status =
+                    "Lock it first with Ctrl o, then l if you want to keep it.".to_owned();
+            }
+        }
+    }
+
+    fn open_session_manager(&self) {
+        open_plugin_pane_floating(
+            "zellij:session-manager",
+            BTreeMap::new(),
+            None,
+            BTreeMap::new(),
+        );
+        close_self();
+    }
+
     fn schedule_update(&mut self) {
         if !self.update_pending {
             self.update_pending = true;
@@ -263,27 +382,26 @@ impl TabNamer {
             );
             return;
         }
-        let locked = serde_json::from_slice::<serde_json::Value>(&stdout)
-            .ok()
+        let response = serde_json::from_slice::<serde_json::Value>(&stdout).ok();
+        let locked = response
+            .as_ref()
             .and_then(|value| value.get("locked").and_then(|value| value.as_bool()));
         let Some(locked) = locked else {
             self.session_status = "Invalid session-lock response".to_owned();
             return;
         };
-        let changed = serde_json::from_slice::<serde_json::Value>(&stdout)
-            .ok()
+        let changed = response
+            .as_ref()
             .and_then(|value| value.get("changed").and_then(|value| value.as_bool()));
         match operation.as_str() {
-            "query" if !self.session_role => {
+            "query" if !self.is_interactive_role() => {
                 self.session_command("query-confirm", name);
             }
             "query" | "query-confirm" if locked => {
-                self.session_locked = Some(true);
-                reconfigure("on_force_close \"detach\"".to_owned(), false);
+                self.set_confirmed_lock_state(true);
             }
             "query" | "query-confirm" => {
-                self.session_locked = Some(false);
-                reconfigure("on_force_close \"quit\"".to_owned(), false);
+                self.set_confirmed_lock_state(false);
             }
             "mark" if locked => {
                 if pending_mark && self.session_name.as_deref() != Some(name.as_str()) {
@@ -309,18 +427,16 @@ impl TabNamer {
                     set_timeout(SESSION_RENAME_TIMEOUT_SECONDS);
                     return;
                 }
-                self.session_locked = Some(true);
-                reconfigure("on_force_close \"detach\"".to_owned(), false);
-                self.session_status = "Locked — detaches on terminal close".to_owned();
-                if self.session_role {
+                self.set_confirmed_lock_state(true);
+                self.session_status = "Locked — persists when detached or switched".to_owned();
+                if self.session_role == SessionRole::Lock {
                     close_focus();
                 }
             }
             "unmark" if !locked => {
-                self.session_locked = Some(false);
-                reconfigure("on_force_close \"quit\"".to_owned(), false);
-                self.session_status = "Unlocked — quits on terminal close".to_owned();
-                if self.session_role {
+                self.set_confirmed_lock_state(false);
+                self.session_status = "Unlocked — quits when its last client leaves".to_owned();
+                if self.session_role == SessionRole::Lock {
                     close_focus();
                 }
             }
@@ -328,7 +444,6 @@ impl TabNamer {
                 self.pending_session_name = None;
                 self.rename_rollback_pending = false;
                 self.session_locked = Some(false);
-                reconfigure("on_force_close \"quit\"".to_owned(), false);
                 self.session_status = "Rename failed — lock rolled back".to_owned();
                 if self.close_after_rename_rollback {
                     self.close_after_rename_rollback = false;
@@ -340,6 +455,20 @@ impl TabNamer {
     }
 
     fn handle_session_key(&mut self, key: KeyWithModifier) -> bool {
+        if self.session_role == SessionRole::SwitchGuard {
+            match key.bare_key {
+                BareKey::Esc => {
+                    close_self();
+                    return false;
+                }
+                BareKey::Enter if switch_guard_enter_opens_manager(self.session_locked) => {
+                    self.open_session_manager();
+                    return false;
+                }
+                _ => {}
+            }
+            return true;
+        }
         match key.bare_key {
             BareKey::Esc => {
                 if self.pending_session_name.is_some() {
@@ -466,29 +595,39 @@ impl TabNamer {
                         PermissionType::ReadApplicationState,
                         PermissionType::ChangeApplicationState,
                         PermissionType::RunCommands,
-                        PermissionType::Reconfigure,
                         PermissionType::OpenTerminalsOrPlugins,
                     ];
-                    if web_access {
+                    if web_access && self.session_role == SessionRole::Headless {
                         permissions.push(PermissionType::WebAccess);
                     }
                     request_permission(&permissions);
                 }
                 Action::Subscribe { web_results } => {
-                    let mut events = vec![
-                        EventType::TabUpdate,
-                        EventType::PaneUpdate,
-                        EventType::ModeUpdate,
-                        EventType::RunCommandResult,
-                        EventType::Timer,
-                        EventType::CwdChanged,
-                        EventType::CommandChanged,
-                    ];
-                    if self.session_role {
-                        events.push(EventType::Key);
-                        events.push(EventType::PastedText);
-                    }
-                    if web_results {
+                    let mut events = match self.session_role {
+                        SessionRole::Headless => vec![
+                            EventType::TabUpdate,
+                            EventType::PaneUpdate,
+                            EventType::ModeUpdate,
+                            EventType::RunCommandResult,
+                            EventType::Timer,
+                            EventType::CwdChanged,
+                            EventType::CommandChanged,
+                            EventType::SessionUpdate,
+                        ],
+                        SessionRole::Lock => vec![
+                            EventType::ModeUpdate,
+                            EventType::RunCommandResult,
+                            EventType::Timer,
+                            EventType::Key,
+                            EventType::PastedText,
+                        ],
+                        SessionRole::SwitchGuard => vec![
+                            EventType::ModeUpdate,
+                            EventType::RunCommandResult,
+                            EventType::Key,
+                        ],
+                    };
+                    if web_results && self.session_role == SessionRole::Headless {
                         events.push(EventType::WebRequestResult);
                     }
                     subscribe(&events);

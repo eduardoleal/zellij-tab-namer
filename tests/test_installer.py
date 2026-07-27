@@ -382,6 +382,40 @@ load_plugins {
         self.assertIn('role "session-switch-guard"', wired)
         self.assertNotIn('LaunchOrFocusPlugin "session-manager"', wired)
 
+    def test_wire_zellij_config_accepts_stock_session_manager_binding(self):
+        config = """keybinds {
+    session {
+        bind "w" {
+            LaunchOrFocusPlugin "session-manager" {
+                floating true
+                move_to_focused_tab true
+            };
+            SwitchToMode "Normal"
+        }
+    }
+}
+
+plugins {
+}
+
+load_plugins {
+}
+"""
+
+        wired, changed = wire_zellij_config(
+            config,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            session_lock_command="zellij-tab-namer",
+            session_lock_state_file=Path("/tmp/state.json"),
+        )
+
+        self.assertTrue(changed)
+        self.assertIn('bind "w" {', wired)
+        self.assertIn('LaunchPlugin "zellij-tab-namer" {', wired)
+        self.assertIn('role "session-switch-guard"', wired)
+        self.assertNotIn('LaunchOrFocusPlugin "session-manager"', wired)
+
     def test_wire_zellij_config_keeps_session_switch_guard_idempotent(self):
         config = """keybinds {
     session {

@@ -1599,8 +1599,8 @@ def _reconcile_session_switch_binding(text: str) -> Tuple[str, bool]:
             r'LaunchOrFocusPlugin\s+"(?:zellij:)?session-manager"\s*\{\s*'
             r'floating\s+true\s*'
             r'move_to_focused_tab\s+true\s*'
-            r'\}\s*'
-            r'(?:SwitchToMode\s+"normal"\s*)?'
+            r'\}\s*;?\s*'
+            r'(?:SwitchToMode\s+"(?:Normal|normal)"\s*)?'
             r'\}\s*',
             existing_binding,
         )

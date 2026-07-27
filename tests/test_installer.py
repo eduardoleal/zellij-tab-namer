@@ -348,6 +348,135 @@ load_plugins {
         self.assertIn('                role "session-lock"', wired)
         self.assertNotIn('configuration { role "session-lock" }', wired)
 
+    def test_wire_zellij_config_guards_session_manager_for_ephemeral_sessions(self):
+        config = """keybinds {
+    session {
+        bind "w" {
+            LaunchOrFocusPlugin "session-manager" {
+                floating true
+                move_to_focused_tab true
+            }
+            SwitchToMode "normal"
+        }
+    }
+}
+
+plugins {
+}
+
+load_plugins {
+}
+"""
+
+        wired, changed = wire_zellij_config(
+            config,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            session_lock_command="zellij-tab-namer",
+            session_lock_state_file=Path("/tmp/state.json"),
+        )
+
+        self.assertTrue(changed)
+        self.assertIn('bind "w" {', wired)
+        self.assertIn('LaunchPlugin "zellij-tab-namer" {', wired)
+        self.assertIn('role "session-switch-guard"', wired)
+        self.assertNotIn('LaunchOrFocusPlugin "session-manager"', wired)
+
+    def test_wire_zellij_config_keeps_session_switch_guard_idempotent(self):
+        config = """keybinds {
+    session {
+        bind "w" {
+            LaunchOrFocusPlugin "zellij:session-manager" {
+                floating true
+                move_to_focused_tab true
+            }
+            SwitchToMode "normal"
+        }
+    }
+}
+
+plugins {
+}
+
+load_plugins {
+}
+"""
+
+        wired, changed = wire_zellij_config(
+            config,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            session_lock_command="zellij-tab-namer",
+            session_lock_state_file=Path("/tmp/state.json"),
+        )
+        rewired, changed_again = wire_zellij_config(
+            wired,
+            Path("/tmp/zellij-tab-namer.wasm"),
+            24,
+            session_lock_command="zellij-tab-namer",
+            session_lock_state_file=Path("/tmp/state.json"),
+        )
+
+        self.assertTrue(changed)
+        self.assertFalse(changed_again)
+        self.assertEqual(rewired.count('role "session-switch-guard"'), 1)
+        self.assertNotIn('LaunchOrFocusPlugin "zellij:session-manager"', rewired)
+
+    def test_wire_zellij_config_refuses_customized_session_manager_binding(self):
+        config = """keybinds {
+    session {
+        bind "w" {
+            LaunchOrFocusPlugin "session-manager" {
+                floating true
+                move_to_focused_tab true
+            }
+            Run "custom-hook"
+            SwitchToMode "normal"
+        }
+    }
+}
+
+plugins {
+}
+
+load_plugins {
+}
+"""
+
+        with self.assertRaisesRegex(InstallError, "already binds w"):
+            wire_zellij_config(
+                config,
+                Path("/tmp/zellij-tab-namer.wasm"),
+                24,
+                session_lock_command="zellij-tab-namer",
+                session_lock_state_file=Path("/tmp/state.json"),
+            )
+
+    def test_wire_zellij_config_refuses_unmanaged_session_switch_binding(self):
+        config = """keybinds {
+    session {
+        bind "w" {
+            Run "custom-session-picker"
+        }
+    }
+}
+
+plugins {
+}
+
+load_plugins {
+}
+"""
+
+        with self.assertRaisesRegex(InstallError, "already binds w"):
+            wire_zellij_config(
+                config,
+                Path("/tmp/zellij-tab-namer.wasm"),
+                24,
+                session_lock_command="zellij-tab-namer",
+                session_lock_state_file=Path("/tmp/state.json"),
+            )
+
     def test_wire_zellij_config_updates_attributed_keybinds_block(self):
         config = """keybinds clear-defaults=true {
 }
@@ -469,7 +598,7 @@ load_plugins {}
                 )
 
     def test_wire_zellij_config_preserves_indented_close_comment_and_newline(self):
-        config = """    on_force_close "detach" // preserve this comment
+        config = """    on_force_close "quit" // preserve this comment
 plugins {
 }
 
@@ -486,7 +615,10 @@ load_plugins {
         )
 
         self.assertTrue(changed)
-        self.assertIn('    on_force_close "quit" // preserve this comment\nplugins {', wired)
+        self.assertIn(
+            '    on_force_close "detach" // preserve this comment\nplugins {',
+            wired,
+        )
 
     def test_wire_zellij_config_ignores_nested_close_behavior(self):
         config = """plugins {
@@ -508,7 +640,7 @@ load_plugins {
         )
 
         self.assertTrue(changed)
-        self.assertIn('\n\non_force_close "quit"\n\nplugins {', wired)
+        self.assertIn('\n\non_force_close "detach"\n\nplugins {', wired)
         self.assertIn('        on_force_close "detach"', wired)
 
     def test_wire_zellij_config_updates_managed_values_preserving_unknown_nodes(self):
@@ -790,7 +922,7 @@ load_plugins {
 
             self.assertEqual(result.status, "complete")
             upgraded_config = paths.zellij_config_file.read_text(encoding="utf-8")
-            self.assertIn('on_force_close "quit"', upgraded_config)
+            self.assertIn('on_force_close "detach"', upgraded_config)
             self.assertIn('llm_base_url "http://localhost:11434/v1"', upgraded_config)
             self.assertIn('llm_model "llama3.2"', upgraded_config)
             helper = Path(

@@ -280,7 +280,10 @@ def format_result(result: InstallResult) -> str:
     if result.verification_command:
         lines.append(f"verify: {shlex.join(result.verification_command)}")
     if result.fresh_session_required:
-        lines.append("fresh Zellij session required for plugin permission/config reload")
+        lines.append(
+            "detach and reattach existing sessions (or start a fresh session) "
+            "before relying on updated plugin permissions and close behavior"
+        )
     if result.manifest_path and not result.dry_run:
         lines.append(f"manifest: {result.manifest_path}")
     return "\n".join(lines) + "\n"
@@ -460,6 +463,8 @@ def wire_zellij_config(
         changed = changed or close_changed
         next_text, binding_changed = _reconcile_session_lock_binding(next_text)
         changed = changed or binding_changed
+        next_text, switch_binding_changed = _reconcile_session_switch_binding(next_text)
+        changed = changed or switch_binding_changed
 
     return next_text, changed
 
@@ -752,7 +757,6 @@ def _plan_wasm_changes(options: InstallOptions, target: Path) -> WasmChanges:
         "ReadApplicationState",
         "ChangeApplicationState",
         "RunCommands",
-        "Reconfigure",
         "OpenTerminalsOrPlugins",
     ]
     effective_grants.extend(options.wasm_permissions)
@@ -1488,10 +1492,10 @@ def _reconcile_root_close_behavior(text: str) -> Tuple[str, bool]:
         raise InstallError("config contains multiple on_force_close nodes; edit manually")
     if matches:
         match = matches[0]
-        replacement = f'{match["indent"]}on_force_close "quit"{match["suffix"]}'
+        replacement = f'{match["indent"]}on_force_close "detach"{match["suffix"]}'
         updated = text[: match.start()] + replacement + text[match.end() :]
         return updated, updated != text
-    replacement = 'on_force_close "quit"'
+    replacement = 'on_force_close "detach"'
     return replacement + "\n\n" + text, True
 
 
@@ -1543,32 +1547,7 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
         '            SwitchToMode "normal"\n'
         '        }\n'
     )
-    keybinds = _find_named_block(text, "keybinds", depth=0)
-    if keybinds is None:
-        keybinds_block = "keybinds {\n    session {\n" + binding + "    }\n}\n\n"
-        return keybinds_block + text, True
-
-    keybinds_text = text[keybinds[0] : keybinds[1]]
-    session_in_keybinds = _find_named_block(keybinds_text, "session")
-    if session_in_keybinds is None:
-        session_block = "    session {\n" + binding + "    }\n"
-        return _insert_before_block_close(text, keybinds, session_block), True
-
-    session = (
-        keybinds[0] + session_in_keybinds[0],
-        keybinds[0] + session_in_keybinds[1],
-    )
-    block = text[session[0] : session[1]]
-    binding_matches = re.finditer(r'(?m)^\s*bind\s+"(?:\\.|[^"\\])*"(?:\s+"(?:\\.|[^"\\])*")*\s*\{', block)
-    for binding_match in binding_matches:
-        keys = re.findall(r'"((?:\\.|[^"\\])*)"', binding_match.group())
-        if "l" not in keys:
-            continue
-        open_brace = block.find("{", binding_match.start(), binding_match.end())
-        close_brace = _matching_brace(block, open_brace)
-        if close_brace is None:
-            raise InstallError("session l binding is not balanced")
-        existing_binding = block[binding_match.start() : close_brace + 1]
+    def reconcile_existing(existing_binding: str) -> Optional[str]:
         launch_match = re.search(
             rf'(?m)^\s*LaunchPlugin\s+"{re.escape(PLUGIN_ALIAS)}"\s*\{{',
             existing_binding,
@@ -1589,7 +1568,98 @@ def _reconcile_session_lock_binding(text: str) -> Tuple[str, bool]:
             launch_block,
         ):
             raise InstallError("session mode already binds l; refusing to replace it")
-        return text, False
+        return None
+
+    return _reconcile_session_binding(text, "l", binding, reconcile_existing)
+
+
+def _reconcile_session_switch_binding(text: str) -> Tuple[str, bool]:
+    binding = (
+        '        bind "w" {\n'
+        f'            LaunchPlugin "{PLUGIN_ALIAS}" {{\n'
+        '                floating true\n'
+        '                move_to_focused_tab true\n'
+        '                role "session-switch-guard"\n'
+        '            }\n'
+        '            SwitchToMode "normal"\n'
+        '        }\n'
+    )
+
+    def reconcile_existing(existing_binding: str) -> Optional[str]:
+        if re.search(
+            rf'(?m)^\s*LaunchPlugin\s+"{re.escape(PLUGIN_ALIAS)}"\s*\{{',
+            existing_binding,
+        ) and re.search(
+            r'(?m)^\s*role\s+"session-switch-guard"\s*$',
+            existing_binding,
+        ):
+            return None
+        stock_session_manager = re.fullmatch(
+            r'\s*bind\s+"w"\s*\{\s*'
+            r'LaunchOrFocusPlugin\s+"(?:zellij:)?session-manager"\s*\{\s*'
+            r'floating\s+true\s*'
+            r'move_to_focused_tab\s+true\s*'
+            r'\}\s*'
+            r'(?:SwitchToMode\s+"normal"\s*)?'
+            r'\}\s*',
+            existing_binding,
+        )
+        if stock_session_manager is None:
+            raise InstallError("session mode already binds w; refusing to replace it")
+        return binding
+
+    return _reconcile_session_binding(text, "w", binding, reconcile_existing)
+
+
+def _reconcile_session_binding(
+    text: str,
+    key: str,
+    binding: str,
+    reconcile_existing: Callable[[str], Optional[str]],
+) -> Tuple[str, bool]:
+    keybinds = _find_named_block(text, "keybinds", depth=0)
+    if keybinds is None:
+        keybinds_block = "keybinds {\n    session {\n" + binding + "    }\n}\n\n"
+        return keybinds_block + text, True
+
+    keybinds_text = text[keybinds[0] : keybinds[1]]
+    session_in_keybinds = _find_named_block(keybinds_text, "session")
+    if session_in_keybinds is None:
+        session_block = "    session {\n" + binding + "    }\n"
+        return _insert_before_block_close(text, keybinds, session_block), True
+
+    session = (
+        keybinds[0] + session_in_keybinds[0],
+        keybinds[0] + session_in_keybinds[1],
+    )
+    block = text[session[0] : session[1]]
+    binding_matches = re.finditer(
+        r'(?m)^\s*bind\s+"(?:\\.|[^"\\])*"'
+        r'(?:\s+"(?:\\.|[^"\\])*")*\s*\{',
+        block,
+    )
+    for binding_match in binding_matches:
+        keys = re.findall(r'"((?:\\.|[^"\\])*)"', binding_match.group())
+        if key not in keys:
+            continue
+        if keys != [key]:
+            raise InstallError(
+                f"session mode already binds {key}; refusing to replace it"
+            )
+        open_brace = block.find("{", binding_match.start(), binding_match.end())
+        close_brace = _matching_brace(block, open_brace)
+        if close_brace is None:
+            raise InstallError(f"session {key} binding is not balanced")
+        existing_binding = block[binding_match.start() : close_brace + 1]
+        replacement = reconcile_existing(existing_binding)
+        if replacement is None:
+            return text, False
+        binding_start = session[0] + binding_match.start()
+        binding_end = session[0] + close_brace + 1
+        return (
+            text[:binding_start] + replacement.rstrip() + text[binding_end:],
+            True,
+        )
     return _insert_before_block_close(text, session, binding), True
 
 

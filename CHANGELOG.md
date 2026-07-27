@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/eduardoleal/zellij-tab-namer/compare/v0.3.0...v0.4.0) (2026-07-27)
+
+
+### Features
+
+* make unlocked sessions ephemeral ([503727e](https://github.com/eduardoleal/zellij-tab-namer/commit/503727e96c75a3f3d9eab40ddf859da774c1d87e))
+* make unlocked sessions ephemeral ([96d3a00](https://github.com/eduardoleal/zellij-tab-namer/commit/96d3a00e11287d8d0f655eac74881eea75fe237f))
+
+
+### Bug Fixes
+
+* accept canonical session manager binding ([#10](https://github.com/eduardoleal/zellij-tab-namer/issues/10)) ([1d9a9c6](https://github.com/eduardoleal/zellij-tab-namer/commit/1d9a9c622f9febbfb7718afa91aec0415638b1bc))
+
 ## [0.3.0](https://github.com/eduardoleal/zellij-tab-namer/compare/v0.2.0...v0.3.0) (2026-07-24)
 
 
